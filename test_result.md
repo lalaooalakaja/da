@@ -3937,3 +3937,220 @@ test_plan:
 agent_communication:
     - agent: "main"
       message: "PERBAIKAN SELESAI, MOHON DIUJI. POC `scripts/poc_approval_chain.py` = 92/92 PASS (19 pemeriksaan baru K1–K19 khusus Request Aksesoris) · `bash scripts/gate.sh` 13/13 HIJAU · `scripts/verify_pr_inbox_roles.py` LULUS. DATA UJI SIAP: ACC-PR-0005 'Kancing plastik habis untuk order WO-2026-08' Rp 30.000.000 (3 tahap, menunggu tahap DEPARTEMEN) dan ACC-PR-0006 'Label woven stok kritis' Rp 400.000 (1 tahap, menunggu tahap DEPARTEMEN) — keduanya dibuat oleh packing@dewiaditya.id. Plus PR pengadaan: PR-202608-0024 (Rp 6 jt, tahap DEPARTEMEN) & PR-202608-0023 (Rp 50 jt, tahap KEUANGAN). Inbox saat ini: gudang@ = 3 item (1 pengadaan + 2 aksesoris), finance@ = 1, admin = 4. CATATAN: 'Gudang' tidak punya modul purchase request tersendiri — pintu pembelian gudang (Purchase Order & Penilaian Supplier) sudah dipindah ke Portal Pengadaan pada sesi sebelumnya; yang masih terpisah HANYA Request Pembelian Aksesoris, dan itulah yang disambungkan sesi ini."
+
+
+#====================================================================================================
+# SESI 2026-08-07 (LANJUTAN) — MENYELESAIKAN VERIFIKASI YANG TERPUTUS + 3 BUG BARU
+#====================================================================================================
+
+user_problem_statement: |
+  "saya ingin anda lanjutkan development dari repo ini https://github.com/banakamamanaba/da
+   sebelumnya development terhenti di [pemanggilan testing agent untuk verifikasi
+   'purchase request di aksesoris dan gudang harusnya tersambung ke procurement']"
+
+  Pilihan owner untuk sesi ini: (1) jalankan ulang POC + gate + buat ulang data uji,
+  lalu SELESAIKAN verifikasi testing agent yang tertunda; (2) lanjut ke backlog:
+  Approval PO ke mesin SSOT, nomor dokumen kembar, dan `except Exception: pass`.
+
+backend:
+  - task: "PEMULIHAN LINGKUNGAN — repo di-restore ke /app dan dibuktikan hidup"
+    implemented: true
+    working: true
+    file: "scripts/bootstrap.sh, scripts/seed_approval_demo.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Repo di-clone & di-rsync ke /app (mengecualikan .env/.git/node_modules/.bootstrap_cache), lalu `bootstrap.sh` SELESAI 92 detik: backend healthy, frontend bundle statis HTTP 200, 6 akun login HTTP 200. Verifikasi ulang di lingkungan BARU: `scripts/poc_approval_chain.py` 92/92 PASS · `bash scripts/gate.sh` 13/13 HIJAU. Jadi kode sesi lalu memang benar; yang hilang HANYA verifikasi agent-nya."
+
+  - task: "BUG BARU 1 — KOLEKSI HANTU: Request Aksesoris tidak pernah terhitung di Dashboard Pengadaan & migrasi supplier"
+    implemented: true
+    working: true
+    file: "backend/routes/procurement_dashboard.py, backend/routes/procurement_suppliers.py, backend/core/pr_approval.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: false
+          agent: "main"
+          comment: "Ditemukan saat menelusuri sisa pekerjaan 'aksesoris tersambung ke procurement'. Kartu KPI 'Request aksesoris' di Dashboard Pengadaan SELALU 0, dan nama supplier yang diketik di Request Aksesoris tidak pernah ikut migrasi ke Master Supplier. DUA sebab yang saling menutupi: (a) koleksi yang dibaca `dewi_accessories_purchase_requests` dan `dewi_acc_purchase_requests` TIDAK PERNAH ADA — koleksi sebenarnya `acc_purchase_requests` (dibuktikan: `list_collection_names()` hanya memuat `acc_purchase_requests`); (b) filter statusnya huruf kecil (`draft`/`submitted`) padahal Request Aksesoris memakai status BERKAPITAL (`Draft`/`Submitted`) — jadi membetulkan nama koleksi saja masih menghasilkan 0. Field supplier-nya juga salah (`supplier_name`; yang benar `supplier`)."
+        - working: true
+          agent: "main"
+          comment: "Nama koleksi, nama field, dan daftar status dipindah menjadi SSOT di `core/pr_approval.py` (`ACC_PR_COLLECTION`, `ACC_PR_SUPPLIER_FIELD`, `ACC_PR_OPEN_STATUSES`) supaya tidak ada modul yang menebak nama lagi — akar bugnya adalah nama yang ditulis ulang di banyak berkas. Ditambah `accessory_pr_awaiting_approval` (yang benar-benar menunggu keputusan). TERBUKTI: `/api/procurement/overview` kini `accessory_pr_total`=2 (dulu 0) dan kartu UI menampilkan '2 · 1 menunggu persetujuan · 2 berjalan'. Diverifikasi testing agent (accessory_pr_total=5) DAN oleh saya di layar."
+
+  - task: "BUG BARU 2 — KONTROL UANG MATI DIAM-DIAM: staf keuangan sungguhan kena 403 di 3-Way Match & daftar penerimaan siap-faktur"
+    implemented: true
+    working: true
+    file: "backend/routes/rahaza_ap_from_gr.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: false
+          agent: "main"
+          comment: "Ditemukan saat regresi 9 pintu Portal Pengadaan: `proc-3way-match` dan `proc-ap-invoices` memuntahkan 403 di console untuk `finance@dewiaditya.id`. Akarnya `_require_finance()` di berkas ini menulis SENDIRI daftar peran ('finance','manager','accountant') sementara peran keuangan yang NYATA di aplikasi ini adalah `accounting`, `staff_keuangan`, `manager_keuangan` (lihat seed_role_accounts.py & core/pr_approval.FINANCE_APPROVER_ROLES). Akibat nyatanya: staf keuangan TIDAK BISA melakukan 3-Way Match (mencocokkan PO <-> Penerimaan <-> Faktur SEBELUM supplier dibayar) — menu tampil, layar terbuka, data selalu kosong. Ini kelas bug yang SAMA dengan laporan owner: daftar peran yang diduplikasi lalu menyimpang dari kenyataan."
+        - working: true
+          agent: "main"
+          comment: "Gerbangnya memakai helper SSOT `routes.shared.require_perm` (izin dinamis menang, daftar peran lama hanya jaring pengaman) dan dipisah BACA vs UBAH: `_require_finance_view` (3-way-match + daftar siap-faktur) menerima izin keuangan ATAU akses Portal Pengadaan — karena layar itu read-only DI DALAM Portal Pengadaan, sehingga admin_pengadaan/purchasing/admin_gudang tidak lagi kena 403 di portalnya sendiri; `_require_finance` (membuat faktur dari penerimaan) tetap keuangan saja. TERBUKTI: finance@ 200 (dulu 403), gudang@ 200, admin 200, hr@ TETAP 403. Di layar: kedua pintu render dengan 0 error console (dulu 2 error masing-masing). Gate KEAMANAN RBAC/IDOR tetap HIJAU."
+
+  - task: "BUG BARU 3 — baris item Request Aksesoris tampil KOSONG 'Rp 0' di kotak persetujuan gabungan"
+    implemented: true
+    working: true
+    file: "backend/core/pr_approval.py, backend/routes/dewi_accessories_purchase.py, backend/routes/dewi_procurement.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: false
+          agent: "main"
+          comment: "Ditemukan DI LAYAR (tidak terlihat dari membaca kode maupun dari uji API): dialog detail ACC-PR-0004 bernilai Rp 30.000.000 menampilkan 'Items (1)' dengan nama barang KOSONG dan 'Rp 0'. Sebabnya `normalize_acc_pr` meneruskan `items` APA ADANYA, sedangkan dialog pengadaan merender `name`/`qty`/`unit`/`total_price` — item aksesoris memakai `acc_name`/`qty_requested`/`estimated_price`. Artinya approver diminta menyetujui puluhan juta rupiah TANPA bisa melihat satu pun barang yang dibeli; persetujuan yang tidak menampilkan apa yang disetujui sama saja tidak ada."
+        - working: true
+          agent: "main"
+          comment: "Ditambah `_acc_item_view()` (memetakan ke bentuk item pengadaan, field asli tetap dibawa agar layar Aksesoris sendiri tak berubah) + `acc_material_map()` (melengkapi nama/kode/satuan dari master untuk dokumen lama yang hanya menyimpan `acc_id`). Dipakai di `/api/procurement/inbox`, detail PR aksesoris, dan tab 'Permintaan Saya'. TERBUKTI di API: name='Kancing bulat plastik' qty=60000 unit='pcs' total_price=30000000. TERBUKTI di layar: baris item menampilkan 'Kancing bulat plastik  60000 pcs  Rp 30.000.000'."
+
+  - task: "GUARDRAIL MERAH PALSU — INV-4 (stok FG/karantina) bisa gagal tanpa ada kerusakan produk"
+    implemented: true
+    working: true
+    file: "scripts/verify_produksi_maklon_invariants.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: false
+          agent: "main"
+          comment: "Gate pertama di lingkungan baru MERAH di INV-4 dengan bukti aneh: `stok_karantina: 0` padahal INV-5 tepat sesudahnya menemukan 10 pcs di karantina. Dua salah-baca di skrip penjaganya: (a) lokasi karantina DITEBAK dari `rahaza_locations.code='ZNA-KARANTINA'`, padahal aplikasi memakai `core.quarantine.get_quarantine_location_id()` yang LEBIH DULU mencari zona kanonik `wh_zones`; (b) jumlah dibaca dari field `qty` MENTAH padahal koleksi stok ditulis 3 skema berbeda dan pembaca resminya `core.stock_schema.read_qty()`. Pesan gagalnya juga menyembunyikan penyebab: baris stok di lokasi lain dilewati tanpa jejak."
+        - working: true
+          agent: "main"
+          comment: "Skrip memakai jalur yang SAMA dengan aplikasi (`_quarantine_location_id()` + `_read_qty()`), dan pesan gagalnya sekarang menyebut lokasi yang diperiksa + `stok_di_lokasi_lain` sehingga ketidakcocokan lokasi langsung terlihat, bukan jadi misteri. Penjaganya TETAP bisa gagal untuk alasan nyata (stok karantina yang benar-benar tidak diposting). Sesudahnya: 19/19 PASS berulang & gate 13/13 HIJAU dua kali."
+
+frontend:
+  - task: "Kartu KPI 'Request aksesoris' di Dashboard Pengadaan jadi berguna"
+    implemented: true
+    working: true
+    file: "frontend/src/components/erp/procurement/ProcurementDashboardModule.jsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Sub-teks kartu diubah dari '{N} menunggu proses' (yang nilainya selalu 0 karena bug koleksi hantu) menjadi '{N} menunggu persetujuan · {M} berjalan' memakai field baru `accessory_pr_awaiting_approval`. Terbukti di layar: 'Request aksesoris 2 · 1 menunggu persetujuan · 2 berjalan'."
+
+metadata:
+  created_by: "main_agent"
+  version: "2.2"
+  test_sequence: 30
+  run_ui: true
+
+test_plan:
+  current_focus:
+    - "Fase B: Approval Purchase Order dipindah ke mesin SSOT core/pr_approval"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: "FASE A SELESAI & TERVERIFIKASI. Testing agent iteration_30: backend 16/16 PASS, 0 bug kritis — SEMUA lubang keamanan Request Aksesoris tertutup (bypass PUT 400, self-approval 403, tahap salah 403, satu orang dua tahap 403, rantai 3 orang berbeda, ambang nilai, penolakan wajib beralasan, jejak audit 3 langkah, inbox gabungan, lencana = isi inbox). Verifikasi UI yang TIDAK selesai dikerjakan testing agent (habis waktu) SAYA SELESAIKAN SENDIRI di browser dan semuanya LULUS: (1) dialog detail ACC-PR — stepper 3 tahap, tombol 'Setujui — Persetujuan Departemen', tanpa tombol 'Buat Purchase Order', tolak tanpa alasan memunculkan pesan wajib; (2) setujui cepat dari kotak persetujuan — banner 'ACC-PR-0005 disetujui penuh — siap dijadikan Purchase Order', kartu hilang, hitungan 3 -> 2; (3) Dashboard Pengadaan kartu 'Request aksesoris' = 2 (dulu selalu 0); (4) layar Request Aksesoris patuh flag server — finance@ tidak dapat tombol Setujui pada PR tahap DEPARTEMEN, tampil alasan + 'Persetujuan Departemen (1/3)'; (5) 9 pintu Portal Pengadaan render tanpa layar putih/Portal Error. Klaim testing agent 'session expires quickly' TIDAK terbukti sebagai bug: auto-logout hanya dipicu HTTP 401 (`lib/apiFetch.js`), token 24 jam di localStorage, dan saya menavigasi 9 pintu dalam SATU sesi tanpa terlempar keluar. TIGA BUG BARU ditemukan & diperbaiki sesi ini (koleksi hantu, 403 keuangan di 3-Way Match, baris item kosong Rp 0) + 1 guardrail merah-palsu. Gate 13/13 HIJAU (dijalankan 3x), POC 92/92 PASS (2x). Data demo persetujuan sekarang IDEMPOTEN lewat `scripts/seed_approval_demo.py` dan dipanggil bootstrap, jadi tidak hilang lagi saat DB dibangun ulang."
+
+
+#====================================================================================================
+# FASE B 2026-08-07 — PERSETUJUAN PURCHASE ORDER DIPINDAH KE MESIN SSOT
+#====================================================================================================
+
+user_problem_statement: |
+  Pilihan owner: "Approval PO (rahaza_po.py) belum memakai mesin SSOT pr_approval —
+  risiko lubang keamanan yang SAMA seperti aksesoris."
+
+backend:
+  - task: "LUBANG KEAMANAN PO: persetujuan Purchase Order MATI untuk semua peran nyata, dan superadmin bisa submit + approve PO yang SAMA sendirian"
+    implemented: true
+    working: true
+    file: "backend/routes/rahaza_po.py, backend/core/pr_approval.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: false
+          agent: "main"
+          comment: "DIBUKTIKAN dengan satu matriks panggilan nyata pada PO yang sama: `admin@garment.com` submit=200 LALU approve=200 (komitmen uang ke supplier SENDIRIAN, tanpa mata kedua), sementara `direktur@` (director — approver TERTINGGI) = 403, `finance@` (accounting) = 403, `gudang@` (admin_gudang) = 403, `packing@` = 403. Akarnya `_require_approver` menulis daftar peran SENDIRI: ('superadmin','owner','manager','production_manager','warehouse_manager') — dan dari lima itu HANYA `superadmin` yang benar-benar ada di aplikasi ini (peran nyata: accounting, admin_gudang, director, supervisor_produksi, admin_aksesoris, tim_packing, admin_maklon, hr, superadmin). `_require_admin` mengidap penyakit yang sama sehingga admin_pengadaan/purchasing/admin_gudang bahkan TIDAK BISA MEMBUAT atau MENGAJUKAN PO. Selain itu: satu tahap saja (`approval_flow_key: single_step`), tidak mengikuti nilai PO, tanpa notifikasi, tanpa jejak audit per tahap, PO tidak pernah muncul di kotak persetujuan, dan penolakan boleh tanpa alasan."
+        - working: true
+          agent: "main"
+          comment: "PO memakai mesin YANG SAMA (`core/pr_approval.py`). `eval_approval()` kini menerima `roles_map`/`labels`/`role_labels` per JENIS DOKUMEN, jadi peta perannya tetap tinggal di SATU berkas (tidak ada daftar peran baru yang bisa menyimpang). Ditambah `PO_STAGE_ROLES` (tahap 1 = PENGADAAN, bukan 'manager departemen mana pun' seperti PR), `po_chain()`, `normalize_po()`, endpoint `/purchase-orders/{id}/timeline`, dan flag server `can_approve`/`can_reject`/`can_submit`/`blocked_reason` di list + detail. Gerbang `_require_admin`/`_require_finance` memakai helper SSOT `routes.shared.require_perm`. Terbukti POC Q1–Q22 + Z1–Z2 = 28/28 PASS."
+
+  - task: "LUBANG UANG: PR Rp 800.000 yang disetujui bisa diterbitkan menjadi PO Rp 800.000.000"
+    implemented: true
+    working: true
+    file: "backend/routes/dewi_procurement.py, backend/core/pr_approval.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: false
+          agent: "main"
+          comment: "`POST /requests/{id}/create-po` menerima `items_override` yang boleh mengubah qty DAN unit_cost TANPA batas, dan tidak pernah membandingkannya dengan nilai PR yang sudah disetujui. Jadi rantai persetujuan PR yang sudah dibangun bisa dilewati sepenuhnya di langkah terakhir: setujui yang murah, terbitkan yang mahal."
+        - working: true
+          agent: "main"
+          comment: "PO menyimpan `pr_approved_value` + `exceeds_pr_value` (toleransi 0,5% mengikuti ambang varians 3-Way Match). `po_chain()` memakai penanda itu: PO dari PR yang TIDAK membengkak cukup 1 tahap konfirmasi pengadaan (kebutuhannya sudah lewat rantai penuh di PR), tetapi PO yang MELEBIHI nilai PR DIPAKSA melewati rantai PENUH sesuai nilainya. Peringatannya juga tampil di kartu kotak persetujuan & dialog detail PO. Terbukti POC Q17 (PR Rp 500.000 → PO Rp 50.000.000 ditandai) dan Q18 (dipaksa chain ['dept','finance','final']) serta Q19 (PO normal tetap 1 tahap)."
+
+  - task: "Purchase Order masuk kotak persetujuan GABUNGAN + lencana konsisten"
+    implemented: true
+    working: true
+    file: "backend/core/pr_approval.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "`pending_for_user()` sekarang membaca TIGA sumber: Permintaan Pengadaan + Request Aksesoris + Purchase Order. Karena helper ini juga yang dipakai lencana TopBar (`/api/approval-inbox/badge`) dan kartu 'Menunggu Keputusan Saya', ketiga angka itu dijamin sama. Terbukti POC Q14–Q16 (bentuk item PO benar; SETIAP item inbox `can_approve`=true; lencana = isi inbox untuk gudang@/finance@/direktur@/hr@). Terlihat di layar: kotak persetujuan gudang@ = 4 item (1 Pengadaan + 1 Purchase Order + 2 Aksesoris)."
+
+frontend:
+  - task: "Tabel & dialog Purchase Order merender Setujui/Tolak untuk siapa pun, lalu backend membalas 403"
+    implemented: true
+    working: true
+    file: "frontend/src/components/erp/PurchaseOrderModule.jsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: false
+          agent: "main"
+          comment: "Tombol Setujui/Tolak digating HANYA `po.status === 'pending_approval'` — tanpa peran — sehingga setiap pengguna melihat tombol yang PASTI gagal (403). Ketiga handler juga membuang isi respons dan menampilkan teks generik ('Gagal menyetujui PO'), jadi pengguna tidak pernah tahu alasannya. Lebih buruk: `rejectPO` mengirim otomatis `reason: 'Tidak ada alasan'` sehingga aturan 'penolakan wajib beralasan' tidak ada artinya."
+        - working: true
+          agent: "main"
+          comment: "Tombol mengikuti flag server `can_approve`/`can_reject`/`can_submit`; bila tidak berhak, `blocked_reason` DITAMPILKAN (data-testid `po-blocked-<id>`). Kolom Status menampilkan tahap aktif + urutan (`po-stage-<id>`) dan penanda 'Melebihi nilai PR yang disetujui'. Dialog detail mendapat stepper rantai persetujuan (`po-approval-stepper`) + bagian Riwayat + peringatan `po-detail-exceeds`. Dialog Setujui menyebut tahap yang sedang disetujui, sisa tahap, catatan opsional, dan catatan override admin. Alasan penolakan WAJIB (tidak ada lagi isian otomatis). Pesan galat server ditampilkan apa adanya. Nama barang jadi baris utama pada tabel item (dulu kode; item bebas tampil berjudul 'Item bebas')."
+
+  - task: "Kartu Purchase Order di kotak persetujuan gabungan"
+    implemented: true
+    working: true
+    file: "frontend/src/components/erp/ProcurementRequestModule.jsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "Kartu PO diberi lencana biru 'Purchase Order' (aksesoris ungu, pengadaan tanpa lencana) plus lencana merah 'Melebihi nilai PR' bila perlu. Dialog detail, timeline, dan tombol aksi memakai `item.api_base` dari server sehingga satu komponen melayani TIGA jenis dokumen tanpa cabang khusus."
+
+metadata:
+  created_by: "main_agent"
+  version: "2.3"
+  test_sequence: 31
+  run_ui: true
+
+test_plan:
+  current_focus:
+    - "LUBANG KEAMANAN PO: persetujuan Purchase Order MATI untuk semua peran nyata"
+    - "LUBANG UANG: PO tidak boleh melebihi nilai PR yang disetujui tanpa rantai penuh"
+    - "Purchase Order masuk kotak persetujuan GABUNGAN + lencana konsisten"
+    - "Tabel & dialog Purchase Order patuh flag server"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: "FASE B SELESAI, MOHON DIUJI. POC BARU `scripts/poc_po_approval.py` = 28/28 PASS (Q1–Q22 + pembersihan Z1–Z2). Regresi: `scripts/poc_approval_chain.py` tetap 92/92 PASS · `bash scripts/gate.sh` 13/13 HIJAU (termasuk gate KEAMANAN RBAC/IDOR). Verifikasi saya sendiri di layar: kotak persetujuan gudang@ memuat 4 kartu (Pengadaan + Purchase Order berlencana biru + 2 Aksesoris); layar Purchase Order menampilkan 'Persetujuan Pengadaan (1/1)' dengan tombol Setujui hanya untuk yang berhak; dialog detail PO memuat 'Rantai Persetujuan' + 'Riwayat'; 0 error console. DATA DEMO: PO-20260807-014 Rp 800.000 (dari PR-202608-0026) sengaja DIBIARKAN menunggu Persetujuan Pengadaan supaya owner melihat contoh PO di kotak persetujuan. Semua dibuat ulang idempoten oleh `scripts/seed_approval_demo.py`."

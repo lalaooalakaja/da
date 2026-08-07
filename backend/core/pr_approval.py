@@ -83,6 +83,44 @@ STAGE_ROLES = {
     STAGE_FINANCE: FINANCE_APPROVER_ROLES,
     STAGE_FINAL: FINAL_APPROVER_ROLES,
 }
+
+# ── PURCHASE ORDER ───────────────────────────────────────────────────────────
+# 2026-08-07 — Purchase Order dipindah ke mesin ini. Sebelum ini `rahaza_po.py`
+# menulis daftar perannya SENDIRI:
+#     _require_approver → ("superadmin", "owner", "manager",
+#                          "production_manager", "warehouse_manager")
+# Dari lima peran itu, HANYA `superadmin` yang benar-benar ada di aplikasi ini
+# (`production_manager`/`warehouse_manager` tidak pernah ada; yang nyata adalah
+# `manager_produksi`/`admin_gudang`). Dibuktikan dengan panggilan nyata:
+# `direktur@` (director, approver tertinggi), `finance@`, dan `gudang@` semuanya
+# **403** saat menyetujui PO, sementara `admin@garment.com` (superadmin) bisa
+# **submit LALU approve PO YANG SAMA sendirian** — komitmen uang ke supplier
+# tanpa satu pun mata kedua.
+#
+# Tahap pertama PO sengaja BUKAN "manager departemen mana pun" (seperti PR),
+# melainkan PENGADAAN: PO adalah dokumen pengadaan, bukan permintaan divisi.
+# Daftarnya tetap tinggal di berkas INI supaya tidak ada duplikasi peran lagi.
+PO_DEPT_APPROVER_ROLES = (
+    "manager_pengadaan", "admin_pengadaan", "purchasing",
+    "admin_gudang", "manager", "dept_head", "manager_produksi",
+)
+PO_STAGE_ROLES = {
+    STAGE_DEPT: PO_DEPT_APPROVER_ROLES,
+    STAGE_FINANCE: FINANCE_APPROVER_ROLES,
+    STAGE_FINAL: FINAL_APPROVER_ROLES,
+}
+PO_STAGE_LABELS = {
+    STAGE_DEPT: "Persetujuan Pengadaan",
+    STAGE_FINANCE: "Persetujuan Keuangan",
+    STAGE_FINAL: "Persetujuan Final (Direksi)",
+}
+PO_STAGE_ROLE_LABELS = {
+    STAGE_DEPT: "pengadaan (manager/admin pengadaan, purchasing, admin gudang)",
+    STAGE_FINANCE: "keuangan (accounting / staff keuangan / manager keuangan)",
+    STAGE_FINAL: "direksi (director / CFO / CEO / owner)",
+}
+PO_COLLECTION = "rahaza_purchase_orders"
+PO_PENDING_STATUS = "pending_approval"
 # Izin dinamis yang setara tiap tahap (katalog: backend/data/permission_catalog.py).
 # Sengaja tidak ada izin yang muncul di dua tahap.
 STAGE_PERMS = {
@@ -164,12 +202,15 @@ def approved_actor_ids(doc: dict) -> set:
             if s.get("action") == "approved" and s.get("actor_id")}
 
 
-def stage_role_ok(user: dict, stage: str) -> bool:
+def stage_role_ok(user: dict, stage: str, roles_map: dict | None = None) -> bool:
     """Berhak atas tahap ini SEBAGAI PERAN TAHAP (bukan sebagai admin).
 
     Mengikuti model "fallback aman" routes/shared.py: izin dinamis menang;
     selama owner belum mengatur izin role ini, daftar peran bawaan tahap
     tersebut yang dipakai (supaya fitur lama tidak mati mendadak).
+
+    roles_map : peta tahap→peran untuk JENIS DOKUMEN ini (mis. `PO_STAGE_ROLES`).
+                Default `STAGE_ROLES` (Permintaan Pengadaan & Request Aksesoris).
 
     PENTING: admin/superadmin memegang izin `"*"`. Bila `"*"` ikut dihitung di
     sini, SETIAP tindakan admin akan tampak sah dan TIDAK PERNAH tercatat
@@ -178,7 +219,7 @@ def stage_role_ok(user: dict, stage: str) -> bool:
     approver tahap final, jadi owner di tahap final = sah, bukan override).
     """
     role = (user.get("role") or "").lower()
-    roles = STAGE_ROLES.get(stage, ())
+    roles = (roles_map or STAGE_ROLES).get(stage, ())
     if role in SUPER_APPROVER_ROLES:
         return role in roles
     from routes.shared import perms_configured, user_permissions
@@ -208,16 +249,25 @@ async def with_department(db, user: dict) -> dict:
     return user
 
 
-def eval_approval(doc: dict, user: dict, chain: list, *, stage=None) -> dict:
+def eval_approval(doc: dict, user: dict, chain: list, *, stage=None,
+                  roles_map: dict | None = None, labels: dict | None = None,
+                  role_labels: dict | None = None) -> dict:
     """Hak + konteks persetujuan untuk SATU dokumen × SATU user.
 
     SSOT tunggal yang dipakai oleh: kotak persetujuan, daftar & detail dokumen
     (flag tombol UI), gerbang approve/reject, dan lencana approval di TopBar.
 
     stage : tahap aktif. Bila None, diturunkan dari `doc["status"]`
-            (Permintaan Pengadaan). Request Aksesoris mengirimnya eksplisit
-            dari `current_approver_stage`.
+            (Permintaan Pengadaan). Request Aksesoris & Purchase Order
+            mengirimnya eksplisit dari `current_approver_stage`.
+    roles_map / labels / role_labels :
+            peta khusus JENIS DOKUMEN (mis. Purchase Order memakai
+            `PO_STAGE_ROLES` + `PO_STAGE_LABELS`). Semua peta tinggal di berkas
+            ini — TIDAK BOLEH ditulis ulang di route mana pun.
     """
+    roles_map = roles_map or STAGE_ROLES
+    labels = labels or STAGE_LABELS
+    role_labels = role_labels or STAGE_ROLE_LABELS
     role = (user.get("role") or "").lower()
     uid = user.get("id")
     is_super = role in SUPER_APPROVER_ROLES
@@ -240,8 +290,8 @@ def eval_approval(doc: dict, user: dict, chain: list, *, stage=None) -> dict:
         chain_view.append({
             "stage": st,
             "order": idx + 1,
-            "label": STAGE_LABELS.get(st, st),
-            "role_hint": STAGE_ROLE_LABELS.get(st, ""),
+            "label": labels.get(st, st),
+            "role_hint": role_labels.get(st, ""),
             "done": bool(d),
             "current": st == stage,
             "actor_name": d.get("actor_name") or "",
@@ -254,8 +304,8 @@ def eval_approval(doc: dict, user: dict, chain: list, *, stage=None) -> dict:
         "chain": chain_view,
         "total_stages": len(chain),
         "stage": stage,
-        "stage_label": STAGE_LABELS.get(stage, ""),
-        "stage_role_hint": STAGE_ROLE_LABELS.get(stage, ""),
+        "stage_label": labels.get(stage, ""),
+        "stage_role_hint": role_labels.get(stage, ""),
         "stage_order": (chain.index(stage) + 1) if stage in chain else None,
         "can_approve": False,
         "can_reject": False,
@@ -266,7 +316,7 @@ def eval_approval(doc: dict, user: dict, chain: list, *, stage=None) -> dict:
     }
     nxt = next_stage_after(chain, stage) if stage else None
     out["next_stage"] = nxt
-    out["next_approver_label"] = (STAGE_ROLE_LABELS.get(nxt, "")
+    out["next_approver_label"] = (role_labels.get(nxt, "")
                                   if nxt else "Selesai — permintaan disetujui penuh")
 
     if not stage:
@@ -274,17 +324,17 @@ def eval_approval(doc: dict, user: dict, chain: list, *, stage=None) -> dict:
         return out
     if stage not in chain:
         out["blocked_reason"] = (
-            f"Tahap '{STAGE_LABELS.get(stage, stage)}' tidak ada dalam rantai persetujuan "
+            f"Tahap '{labels.get(stage, stage)}' tidak ada dalam rantai persetujuan "
             "permintaan ini. Hubungi admin.")
         if not is_super:
             return out
 
     violations, reasons = [], []
-    if not stage_role_ok(user, stage):
+    if not stage_role_ok(user, stage, roles_map):
         violations.append("stage_role")
         reasons.append(
-            f"Tahap saat ini {STAGE_LABELS.get(stage, stage)} — hanya "
-            f"{STAGE_ROLE_LABELS.get(stage, 'peran tahap ini')} yang berhak memutuskan.")
+            f"Tahap saat ini {labels.get(stage, stage)} — hanya "
+            f"{role_labels.get(stage, 'peran tahap ini')} yang berhak memutuskan.")
     if uid and doc.get("requested_by") == uid:
         violations.append("self_approval")
         reasons.append("Anda pembuat permintaan ini — pembuat tidak boleh "
@@ -318,16 +368,20 @@ def eval_approval(doc: dict, user: dict, chain: list, *, stage=None) -> dict:
 async def notify_stage_approvers(db, doc: dict, stage: str, chain: list, *,
                                  module_id: str = "proc-requests",
                                  number: str = "", title: str = "",
-                                 kind_label: str = "Permintaan Pengadaan"):
+                                 kind_label: str = "Permintaan Pengadaan",
+                                 roles_map: dict | None = None,
+                                 labels: dict | None = None,
+                                 value_field: str = "total_estimated"):
     """Beri tahu approver tahap `stage` lewat BEL notifikasi (SSOT `notifications`).
 
     Best-effort: kegagalan notifikasi tidak boleh membatalkan persetujuan.
     """
     if not stage:
         return
+    labels = labels or STAGE_LABELS
     try:
         from utils.notif_unified import notif_insert
-        roles = list(STAGE_ROLES.get(stage, ()))
+        roles = list((roles_map or STAGE_ROLES).get(stage, ()))
         if not roles:
             return
         rows = await db.users.find(
@@ -344,10 +398,10 @@ async def notify_stage_approvers(db, doc: dict, stage: str, chain: list, *,
             if same:
                 ids = same
         idx = chain.index(stage) + 1 if stage in chain else 1
-        rp = f"Rp {float(doc.get('total_estimated') or 0):,.0f}".replace(",", ".")
+        rp = f"Rp {float(doc.get(value_field) or 0):,.0f}".replace(",", ".")
         body = (f"{number} — {title}\n"
                 f"Nilai: {rp}\n"
-                f"Menunggu {STAGE_LABELS.get(stage, stage)} "
+                f"Menunggu {labels.get(stage, stage)} "
                 f"(tahap {idx} dari {len(chain)})")
         await notif_insert(
             db, type="rahaza", subtype="procurement_approval", severity="warning",
@@ -410,9 +464,80 @@ def acc_display_status(doc: dict) -> str:
     return ACC_STATUS_DISPLAY.get(st, "draft")
 
 
-def normalize_acc_pr(doc: dict) -> dict:
+def _acc_item_view(it: dict, mat: dict | None = None) -> dict:
+    """Satu baris item Request Aksesoris → BENTUK item Permintaan Pengadaan.
+
+    DITEMUKAN DI LAYAR 2026-08-07: dialog persetujuan gabungan merender
+    `name` / `qty` / `unit` / `total_price`, sedangkan item Request Aksesoris
+    memakai `acc_name` / `qty_requested` / `estimated_price`. Akibatnya baris
+    item tampil **kosong dengan "Rp 0"** — approver diminta menyetujui
+    Rp 30.000.000 tanpa bisa melihat SATU PUN barang yang dibeli. Persetujuan
+    yang tidak menampilkan apa yang disetujui sama saja tidak ada.
+
+    Field aslinya tetap dibawa (`**it`) supaya layar Aksesoris sendiri, yang
+    membaca `acc_name`/`qty_requested`, tidak berubah perilakunya.
+    """
+    mat = mat or {}
+    try:
+        qty = float(it.get("qty_requested") if it.get("qty_requested") is not None
+                    else it.get("qty") or 0)
+    except (TypeError, ValueError):
+        qty = 0.0
+    try:
+        price = float(it.get("estimated_price") or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+    unit = it.get("unit") or mat.get("unit") or "pcs"
+    name = (it.get("acc_name") or it.get("name") or mat.get("name")
+            or it.get("acc_code") or mat.get("code") or "Item aksesoris")
+    return {
+        **it,
+        "material_id": it.get("acc_id") or it.get("material_id") or None,
+        "material_code": it.get("acc_code") or mat.get("code") or "",
+        "name": name,
+        "specification": it.get("notes") or it.get("specification") or "",
+        "qty": qty,
+        "unit": unit,
+        "uom": unit,
+        "estimated_price": price,
+        "total_price": round(qty * price, 2),
+    }
+
+
+async def acc_material_map(db, docs) -> dict:
+    """{material_id: {code, name, unit}} untuk semua item pada `docs`.
+
+    Dipakai melengkapi nama/kode barang yang TIDAK tersimpan di dokumen
+    (form lama hanya mengirim `acc_id` + `qty_requested`), supaya baris item
+    tidak pernah tampil kosong di kotak persetujuan.
+    """
+    ids = {
+        (i.get("acc_id") or i.get("material_id"))
+        for d in (docs or []) for i in (d.get("items") or [])
+    }
+    ids.discard(None)
+    ids.discard("")
+    if not ids:
+        return {}
+    try:
+        rows = await db.rahaza_materials.find(
+            {"id": {"$in": list(ids)}},
+            {"_id": 0, "id": 1, "code": 1, "name": 1, "unit": 1},
+        ).to_list(len(ids) + 5)
+        return {r["id"]: r for r in rows if r.get("id")}
+    except Exception as e:  # noqa: BLE001 — melengkapi nama tidak boleh mematikan approval
+        logger.warning("[pr-approval] gagal melengkapi nama barang aksesoris: %s", e)
+        return {}
+
+
+def normalize_acc_pr(doc: dict, mats: dict | None = None) -> dict:
     """Bentuk Request Pembelian Aksesoris → bentuk yang dipahami UI pengadaan."""
     prio = (doc.get("priority") or "Normal").strip().lower()
+    mats = mats or {}
+    items = [
+        _acc_item_view(i, mats.get(i.get("acc_id") or i.get("material_id")))
+        for i in (doc.get("items") or [])
+    ]
     return {
         "id": doc.get("id"),
         "kind": "acc_pr",
@@ -429,7 +554,7 @@ def normalize_acc_pr(doc: dict) -> dict:
         "status": acc_display_status(doc),
         "raw_status": doc.get("status"),
         "total_estimated": float(doc.get("total_estimated") or 0),
-        "items": doc.get("items") or [],
+        "items": items,
         "requested_by": doc.get("requested_by"),
         "requested_by_name": doc.get("requested_by_name") or doc.get("created_by") or "",
         "created_at": doc.get("created_at"),
@@ -440,11 +565,17 @@ def normalize_acc_pr(doc: dict) -> dict:
     }
 
 
-async def pending_for_user(db, user: dict, *, include_acc: bool = True) -> list:
+async def pending_for_user(db, user: dict, *, include_acc: bool = True,
+                          include_po: bool = True) -> list:
     """SEMUA permintaan pembelian yang menunggu KEPUTUSAN user ini.
 
     Dipakai bersama oleh `/api/procurement/inbox` dan lencana
     `/api/approval-inbox/badge` supaya angka lencana = isi kotak persetujuan.
+
+    Tiga sumber: Permintaan Pengadaan · Request Pembelian Aksesoris ·
+    **Purchase Order** (2026-08-07). PO ikut karena PO adalah komitmen UANG ke
+    supplier — pekerjaan persetujuan pembelian tidak boleh tersebar di beberapa
+    kotak masuk; itu keluhan awal owner.
     """
     from routes.dewi_procurement import _ser
     u = await with_department(db, user)
@@ -469,14 +600,112 @@ async def pending_for_user(db, user: dict, *, include_acc: bool = True) -> list:
         accs = await db.acc_purchase_requests.find(
             {"status": "Submitted"}, {"_id": 0}
         ).sort("submitted_at", 1).to_list(500)
+        # Nama & satuan barang dilengkapi dari master supaya baris item di kotak
+        # persetujuan tidak pernah kosong (lihat `_acc_item_view`).
+        mats = await acc_material_map(db, accs)
         for d in accs:
             chain = doc_chain(d, cfg)
             ev = eval_approval(d, u, chain, stage=d.get("current_approver_stage") or STAGE_DEPT)
             if not ev["can_approve"]:
                 continue
-            item = _ser(normalize_acc_pr(d))
+            item = _ser(normalize_acc_pr(d, mats))
+            item.update(ev)
+            out.append(item)
+
+    if include_po:
+        pos = await db[PO_COLLECTION].find(
+            {"status": PO_PENDING_STATUS}, {"_id": 0}
+        ).sort("submitted_at", 1).to_list(500)
+        for d in pos:
+            chain = po_chain(d, cfg)
+            ev = eval_approval(
+                d, u, chain, stage=d.get("current_approver_stage") or STAGE_DEPT,
+                roles_map=PO_STAGE_ROLES, labels=PO_STAGE_LABELS,
+                role_labels=PO_STAGE_ROLE_LABELS)
+            if not ev["can_approve"]:
+                continue
+            item = _ser(normalize_po(d))
             item.update(ev)
             out.append(item)
 
     out.sort(key=lambda x: str(x.get("submitted_at") or x.get("created_at") or ""))
     return out
+
+
+# ── PURCHASE ORDER — rantai & bentuk untuk kotak persetujuan ────────────────
+def po_chain(doc: dict, cfg: dict) -> list:
+    """Tahap yang WAJIB dilalui sebuah Purchase Order.
+
+    Dibekukan saat submit (`approval_chain`). Untuk PO baru:
+      · dasarnya NILAI PO memakai ambang yang SAMA dengan Permintaan Pengadaan
+        (satu tempat mengatur "uang sebesar ini butuh berapa mata");
+      · **PENGECUALIAN**: PO yang lahir dari PR yang sudah disetujui penuh dan
+        nilainya TIDAK melebihi nilai yang disetujui → cukup 1 tahap pengadaan
+        (memastikan supplier & harga), karena kebutuhannya sudah lewat rantai
+        penuh. Kalau nilainya MELEBIHI PR-nya, rantai penuh berlaku lagi —
+        inilah yang menutup lubang "PR Rp 800 ribu disetujui, lalu diterbitkan
+        PO Rp 800 juta ke supplier".
+    """
+    stored = doc.get("approval_chain")
+    if isinstance(stored, list) and stored:
+        keep = [s for s in stored if s in PO_STAGE_ROLES]
+        if keep:
+            return keep
+    full = compute_chain(doc.get("total_value"), cfg)
+    if doc.get("from_pr_id") and not doc.get("exceeds_pr_value"):
+        return [STAGE_DEPT]
+    return full
+
+
+def normalize_po(doc: dict) -> dict:
+    """Purchase Order → bentuk yang dipahami UI kotak persetujuan pengadaan."""
+    items = []
+    for it in (doc.get("items") or []):
+        try:
+            qty = float(it.get("qty_ordered") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        try:
+            cost = float(it.get("unit_cost") or 0)
+        except (TypeError, ValueError):
+            cost = 0.0
+        items.append({
+            **it,
+            "name": (it.get("description") or it.get("material_name")
+                     or it.get("material_code") or "Item PO"),
+            "qty": qty,
+            "unit": it.get("uom") or it.get("unit") or "pcs",
+            "estimated_price": cost,
+            "total_price": round(qty * cost, 2),
+        })
+    return {
+        "id": doc.get("id"),
+        "kind": "po",
+        "kind_label": "Purchase Order",
+        "api_base": "/api/rahaza/purchase-orders",
+        "module_id": "proc-purchase-orders",
+        "request_number": doc.get("po_number") or "",
+        "title": (f"PO ke {doc.get('vendor_name') or 'supplier'}"
+                  + (f" (dari {doc['from_pr_number']})" if doc.get("from_pr_number") else "")),
+        "description": doc.get("notes") or "",
+        "justification": doc.get("notes") or "",
+        "department": doc.get("department") or "",
+        "priority": "high" if doc.get("exceeds_pr_value") else "medium",
+        "request_type": "purchase_order",
+        "status": "submitted",          # kosakata status UI pengadaan
+        "raw_status": doc.get("status"),
+        "total_estimated": float(doc.get("total_value") or 0),
+        "items": items,
+        "requested_by": doc.get("requested_by") or doc.get("created_by"),
+        "requested_by_name": doc.get("created_by_name") or "",
+        "created_at": doc.get("created_at"),
+        "submitted_at": doc.get("submitted_at") or None,
+        "rejection_reason": doc.get("rejected_reason") or None,
+        "supplier": doc.get("vendor_name") or "",
+        "approval_steps": doc.get("approval_steps") or [],
+        # Peringatan yang WAJIB terlihat approver: PO ini lebih mahal dari
+        # permintaan yang sudah disetujui.
+        "exceeds_pr_value": bool(doc.get("exceeds_pr_value")),
+        "pr_approved_value": float(doc.get("pr_approved_value") or 0),
+        "from_pr_number": doc.get("from_pr_number") or "",
+    }

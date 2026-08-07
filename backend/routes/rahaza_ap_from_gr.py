@@ -34,21 +34,61 @@ router = APIRouter(prefix='/api/rahaza', tags=['rahaza-ap-from-gr'])
 
 VARIANCE_TOLERANCE_PCT = 0.5  # ± 0.5% considered matched
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PERAN KEUANGAN — SSOT, JANGAN DITULIS ULANG DI TEMPAT LAIN
+# ─────────────────────────────────────────────────────────────────────────────
+# BUG DITEMUKAN 2026-08-07 DI LAYAR: `_require_finance` memakai daftar peran
+# yang ditulis SENDIRI di berkas ini — ('finance', 'manager', 'accountant') —
+# padahal peran keuangan yang BENAR-BENAR ada di aplikasi ini adalah
+# `accounting`, `staff_keuangan`, `manager_keuangan` (lihat
+# `backend/scripts/seed_role_accounts.py` dan `core/pr_approval.FINANCE_APPROVER_ROLES`).
+#
+# Akibat nyatanya: akun staf keuangan sungguhan (`finance@dewiaditya.id`,
+# role `accounting`) mendapat **403** di DUA pintu yang justru pekerjaannya:
+#   · 3-Way Match (mencocokkan PO ↔ Penerimaan ↔ Faktur SEBELUM supplier dibayar)
+#   · daftar penerimaan yang siap difakturkan
+# Menu-nya tampil, layarnya terbuka, tapi datanya selalu kosong — kontrol uang
+# yang MATI DIAM-DIAM. Ini kelas bug yang sama dengan laporan owner soal
+# Request Aksesoris: DAFTAR PERAN YANG DIDUPLIKASI lalu menyimpang dari kenyataan.
+#
+# Sekarang gerbangnya memakai helper SSOT `routes.shared.require_perm` (izin
+# dinamis menang; daftar peran lama hanya jaring pengaman) — sama seperti modul
+# keuangan lain (mis. `dewi_bank_reconciliation.py`).
+FINANCE_LEGACY_ROLES = (
+    'accounting', 'staff_keuangan', 'manager_keuangan', 'finance', 'finance_manager',
+    'accountant', 'manager', 'owner', 'admin', 'superadmin',
+)
+
 
 def _uid(): return str(uuid.uuid4())
 def _now(): return datetime.now(timezone.utc)
 def _today_iso(): return date.today().isoformat()
 
 
+async def _require_finance_view(request: Request):
+    """Boleh MELIHAT hutang/3-way-match (read-only).
+
+    3-Way Match & daftar penerimaan siap-faktur adalah layar READ-ONLY di dalam
+    **Portal Pengadaan**. Kalau gerbangnya keuangan-saja, maka `admin_pengadaan`,
+    `manager_pengadaan`, `purchasing`, dan `admin_gudang` — yang menu-nya JELAS
+    menampilkan pintu itu — semuanya kena 403 di portalnya sendiri. Jadi izin
+    baca mengikuti akses Portal Pengadaan + izin keuangan; yang MENGUBAH hutang
+    (membuat faktur) tetap keuangan saja (`_require_finance`).
+    """
+    from routes.shared import PORTAL_ACCESS, require_perm
+    return await require_perm(
+        request, 'fin.ap.view', 'fin.ap.manage', 'finance.manage', 'proc.po.manage',
+        legacy_roles=FINANCE_LEGACY_ROLES + tuple(PORTAL_ACCESS.get('procurement', ())),
+        message='Akses ditolak: butuh akses Portal Pengadaan atau keuangan.')
+
+
 async def _require_finance(request: Request):
-    user = await require_auth(request)
-    role = (user.get('role') or '').lower()
-    if role in ('superadmin', 'admin', 'owner', 'finance', 'manager', 'accountant'):
-        return user
-    perms = user.get('_permissions') or []
-    if '*' in perms or 'finance.manage' in perms or 'accounting.manage' in perms:
-        return user
-    raise HTTPException(403, 'Forbidden: butuh permission finance/accounting/manager.')
+    """Boleh MENGUBAH hutang (membuat faktur dari penerimaan)."""
+    from routes.shared import require_perm
+    return await require_perm(
+        request, 'fin.ap.manage', 'finance.manage',
+        legacy_roles=FINANCE_LEGACY_ROLES,
+        message='Akses ditolak: butuh izin mengelola hutang supplier (AP).')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -81,7 +121,7 @@ async def grs_available_for_invoice(
     
     Filters: vendor_name, po_id.
     """
-    await _require_finance(request)
+    await _require_finance_view(request)
     db = get_db()
     q: Dict[str, Any] = {
         'status': {'$in': ['received', 'completed', 'partial_received']},
@@ -365,7 +405,7 @@ async def three_way_match_dashboard(
     - qty_variance, value_variance, variance_pct
     - status (matched / variance / over / under / pending)
     """
-    await _require_finance(request)
+    await _require_finance_view(request)
     db = get_db()
 
     po_query: Dict[str, Any] = {
@@ -494,7 +534,7 @@ async def three_way_match_dashboard(
 @router.get('/3way-match/{po_id}')
 async def three_way_match_detail(po_id: str, request: Request):
     """Detail line-by-line PO ↔ GR ↔ AP Invoice reconciliation for one PO."""
-    await _require_finance(request)
+    await _require_finance_view(request)
     db = get_db()
 
     po = await db.rahaza_purchase_orders.find_one({'id': po_id}, {'_id': 0})

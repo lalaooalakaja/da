@@ -292,9 +292,9 @@ async def update_purchase_request(pr_id: str, request: Request):
 # persetujuan gabungan `/api/procurement/inbox` + lencana TopBar.
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _acc_out(doc: dict, ev: dict) -> dict:
+def _acc_out(doc: dict, ev: dict, mats: dict | None = None) -> dict:
     from core.pr_approval import normalize_acc_pr
-    out = serialize_doc(normalize_acc_pr(doc))
+    out = serialize_doc(normalize_acc_pr(doc, mats))
     out.update(ev)
     return out
 
@@ -323,7 +323,8 @@ async def get_purchase_request(pr_id: str, request: Request):
     user = await require_auth(request)
     db = get_db()
     doc, _chain, ev, _cfg = await _acc_ctx(db, pr_id, user)
-    return _acc_out(doc, ev)
+    from core.pr_approval import acc_material_map
+    return _acc_out(doc, ev, await acc_material_map(db, [doc]))
 
 
 @router.get("/purchase-requests/{pr_id}/timeline")

@@ -45,6 +45,7 @@ export default function PurchaseOrderModule({ token, onNavigate }) {
   const [cancelModal, setCancelModal] = useState(false);
   const [selectedPO, setSelectedPO] = useState(null);
   const [rejectReason, setRejectReason] = useState('');
+  const [approveNote, setApproveNote] = useState('');
   const [cancelReason, setCancelReason] = useState('');
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
@@ -276,17 +277,35 @@ export default function PurchaseOrderModule({ token, onNavigate }) {
     setSubmitModal(true);
   };
 
+  // 2026-08-07 — pesan galat dari SERVER harus DITAMPILKAN.
+  // Sebelumnya ketiga aksi ini membuang isi respons dan menampilkan teks generik
+  // ("Gagal menyetujui PO"), padahal backend mengirim alasan yang tepat dan
+  // berbahasa Indonesia (mis. "Anda pembuat permintaan ini…", "Tahap saat ini
+  // Persetujuan Keuangan — hanya keuangan yang berhak memutuskan."). Tanpa ini
+  // pengguna hanya tahu "gagal" tanpa pernah tahu APA yang harus dilakukan.
+  const serverError = async (r, fallback) => {
+    try {
+      const b = await r.json();
+      return b?.detail || b?.message || fallback;
+    } catch { return fallback; }
+  };
+
   const submitPO = async () => {
     if (!selectedPO) return;
     setSaving(true);
     try {
       const r = await fetch(`/api/rahaza/purchase-orders/${selectedPO.id}/submit`, { method: 'POST', headers });
       if (r.ok) {
-        toast.success('PO berhasil diajukan untuk approval');
+        const d = await r.json().catch(() => ({}));
+        toast.success(
+          d?.total_stages > 1
+            ? `PO diajukan — butuh ${d.total_stages} tahap persetujuan, sekarang menunggu ${d.stage_label || 'tahap pertama'}`
+            : `PO diajukan — menunggu ${d?.stage_label || 'persetujuan'}`
+        );
         setSubmitModal(false);
         await fetchList();
       } else {
-        throw new Error('Gagal mengajukan PO');
+        throw new Error(await serverError(r, 'Gagal mengajukan PO'));
       }
     } catch (e) {
       toast.error(e.message);
@@ -297,6 +316,7 @@ export default function PurchaseOrderModule({ token, onNavigate }) {
 
   const openApproveModal = (po) => {
     setSelectedPO(po);
+    setApproveNote('');
     setApproveModal(true);
   };
 
@@ -306,14 +326,20 @@ export default function PurchaseOrderModule({ token, onNavigate }) {
       const r = await fetch(`/api/rahaza/purchase-orders/${selectedPO.id}/approve`, {
         method: 'POST',
         headers,
+        body: JSON.stringify({ comment: approveNote }),
       });
       if (r.ok) {
-        toast.success(`PO ${selectedPO.po_number} berhasil disetujui`);
+        const d = await r.json().catch(() => ({}));
+        toast.success(
+          d?.next_stage
+            ? `${selectedPO.po_number} disetujui — lanjut ke ${d.next_stage_label}`
+            : `${selectedPO.po_number} disetujui penuh — siap dikirim ke supplier`
+        );
         setApproveModal(false);
         fetchList();
         if (detailModal) openDetail(selectedPO);
       } else {
-        throw new Error('Gagal menyetujui PO');
+        throw new Error(await serverError(r, 'Gagal menyetujui PO'));
       }
     } catch (e) {
       toast.error(e.message);
@@ -329,12 +355,19 @@ export default function PurchaseOrderModule({ token, onNavigate }) {
   };
 
   const rejectPO = async () => {
+    // Alasan WAJIB. Dulu frontend mengirim "Tidak ada alasan" secara otomatis,
+    // sehingga aturan "penolakan harus beralasan" tidak ada artinya dan pembuat
+    // PO tidak pernah tahu apa yang harus diperbaiki.
+    if (!rejectReason.trim()) {
+      toast.error('Alasan penolakan wajib diisi agar pembuat PO tahu apa yang harus diperbaiki.');
+      return;
+    }
     setSaving(true);
     try {
       const r = await fetch(`/api/rahaza/purchase-orders/${selectedPO.id}/reject`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ reason: rejectReason || 'Tidak ada alasan' }),
+        body: JSON.stringify({ reason: rejectReason.trim() }),
       });
       if (r.ok) {
         toast.success(`PO ${selectedPO.po_number} ditolak`);
@@ -342,7 +375,7 @@ export default function PurchaseOrderModule({ token, onNavigate }) {
         fetchList();
         if (detailModal) openDetail(selectedPO);
       } else {
-        throw new Error('Gagal menolak PO');
+        throw new Error(await serverError(r, 'Gagal menolak PO'));
       }
     } catch (e) {
       toast.error(e.message);
@@ -518,31 +551,62 @@ export default function PurchaseOrderModule({ token, onNavigate }) {
                   <td className="py-3 font-mono text-xs">Rp {(po.total_value || 0).toLocaleString('id-ID')}</td>
                   <td className="py-3">
                     <StatusBadge status={po.status} />
+                    {/* Tahap aktif dari SERVER — dulu kolom ini hanya menampilkan
+                        "Menunggu Persetujuan" tanpa memberi tahu tahap ke berapa
+                        dari berapa, sehingga tidak ada yang tahu siapa gilirannya. */}
+                    {po.status === 'pending_approval' && po.stage_label && (
+                      <div className="mt-1 text-[10px] text-muted-foreground" data-testid={`po-stage-${po.id}`}>
+                        {po.stage_label}{po.total_stages ? ` (${po.stage_order}/${po.total_stages})` : ''}
+                      </div>
+                    )}
+                    {po.exceeds_pr_value && (
+                      <div className="mt-1 text-[10px] font-medium text-amber-700 dark:text-amber-400"
+                           data-testid={`po-exceeds-${po.id}`}>
+                        Melebihi nilai PR yang disetujui
+                      </div>
+                    )}
                   </td>
                   <td className="py-3 pr-4 text-right">
                     <div className="flex items-center justify-end gap-1">
                       <Button variant="ghost" size="sm" onClick={() => openDetail(po)} data-testid={`po-view-${po.id}`}>
                         <Eye className="w-4 h-4" />
                       </Button>
-                      {po.status === 'draft' && (
+                      {(po.status === 'draft' || po.status === 'rejected') && po.can_submit !== false && (
                         <>
                           <Button variant="ghost" size="sm" onClick={() => openSubmitModal(po)} data-testid={`po-submit-${po.id}`}>
                             <Send className="w-4 h-4" />
                           </Button>
-                          <Button variant="ghost" size="sm" onClick={() => deletePO(po)} data-testid={`po-delete-${po.id}`}>
-                            <Trash2 className="w-4 h-4 text-red-700 dark:text-red-400" />
-                          </Button>
+                          {po.status === 'draft' && (
+                            <Button variant="ghost" size="sm" onClick={() => deletePO(po)} data-testid={`po-delete-${po.id}`}>
+                              <Trash2 className="w-4 h-4 text-red-700 dark:text-red-400" />
+                            </Button>
+                          )}
                         </>
                       )}
-                      {po.status === 'pending_approval' && (
+                      {/* 2026-08-07 — tombol Setujui/Tolak mengikuti FLAG SERVER
+                          (`can_approve`/`can_reject`), bukan sekadar status.
+                          Dulu digating hanya `status === 'pending_approval'`
+                          sehingga SIAPA PUN yang login melihat tombolnya lalu
+                          backend membalas 403 — tombol yang tampak bisa dipakai
+                          tapi selalu gagal. Kalau tidak berhak, alasannya
+                          DITAMPILKAN, bukan tombolnya hilang tanpa penjelasan. */}
+                      {po.status === 'pending_approval' && po.can_approve && (
                         <>
-                          <Button variant="ghost" size="sm" onClick={() => openApproveModal(po)} data-testid={`po-approve-${po.id}`}>
+                          <Button variant="ghost" size="sm" onClick={() => openApproveModal(po)}
+                                  title={po.stage_label ? `Setujui — ${po.stage_label}` : 'Setujui'}
+                                  data-testid={`po-approve-${po.id}`}>
                             <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                           </Button>
                           <Button variant="ghost" size="sm" onClick={() => openRejectModal(po)} data-testid={`po-reject-${po.id}`}>
                             <XCircle className="w-4 h-4 text-red-700 dark:text-red-400" />
                           </Button>
                         </>
+                      )}
+                      {po.status === 'pending_approval' && !po.can_approve && (
+                        <span className="max-w-[260px] text-[10px] leading-snug text-muted-foreground text-right"
+                              data-testid={`po-blocked-${po.id}`}>
+                          {po.blocked_reason || 'Menunggu approver yang berhak.'}
+                        </span>
                       )}
                       {(po.status === 'approved' || po.status === 'partially_received') && (
                         <Button variant="ghost" size="sm" onClick={() => createGRFromPO(po)} data-testid={`po-create-gr-${po.id}`}>
@@ -861,6 +925,93 @@ export default function PurchaseOrderModule({ token, onNavigate }) {
               </div>
             </div>
 
+            {/* ── Rantai persetujuan PO (2026-08-07) ───────────────────────
+                Dulu tidak ada apa pun di sini: PO hanya punya satu langkah
+                "approve" tanpa tahap, tanpa siapa & kapan. Sekarang approver
+                bisa melihat tahap ke berapa dari berapa, siapa yang sudah
+                memutuskan, dan siapa giliran berikutnya. */}
+            {Array.isArray(selectedPO.chain) && selectedPO.chain.length > 0 && (
+              <div className="rounded-xl border border-[var(--glass-border)] p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-sm font-semibold text-foreground">Rantai Persetujuan</div>
+                  <div className="text-xs text-muted-foreground">
+                    {selectedPO.total_stages} tahap untuk nilai Rp {(selectedPO.total_value || 0).toLocaleString('id-ID')}
+                  </div>
+                </div>
+                <div className="space-y-2" data-testid="po-approval-stepper">
+                  {selectedPO.chain.map((s) => (
+                    <div key={s.stage}
+                         className={`flex items-start gap-3 rounded-lg px-3 py-2 border ${
+                           s.done ? 'bg-emerald-50 dark:bg-emerald-400/10 border-emerald-300/30'
+                           : s.current ? 'bg-amber-50 dark:bg-amber-400/10 border-amber-300/40'
+                           : 'bg-foreground/5 border-transparent'}`}>
+                      <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${
+                        s.done ? 'bg-emerald-600 text-white'
+                        : s.current ? 'bg-amber-500 text-white' : 'bg-foreground/15 text-muted-foreground'}`}>
+                        {s.order}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-foreground">
+                          {s.label}
+                          {s.current && (
+                            <span className="ml-2 text-[10px] font-normal text-amber-700 dark:text-amber-400">
+                              Menunggu sekarang
+                            </span>
+                          )}
+                          {s.override && (
+                            <span className="ml-2 text-[10px] font-normal text-violet-700 dark:text-violet-400">
+                              override admin
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {s.done
+                            ? `${s.actor_name}${s.timestamp ? ` — ${new Date(s.timestamp).toLocaleString('id-ID')}` : ''}`
+                            : `Menunggu ${s.role_hint}`}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {selectedPO.next_approver_label && (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Berikutnya setelah tahap ini: {selectedPO.next_approver_label}
+                  </p>
+                )}
+                {selectedPO.status === 'pending_approval' && !selectedPO.can_approve && selectedPO.blocked_reason && (
+                  <p className="mt-2 rounded-lg bg-amber-50 dark:bg-amber-400/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300"
+                     data-testid="po-detail-blocked">
+                    {selectedPO.blocked_reason}
+                  </p>
+                )}
+                {selectedPO.exceeds_pr_value && (
+                  <p className="mt-2 rounded-lg bg-red-50 dark:bg-red-400/10 px-3 py-2 text-xs text-red-700 dark:text-red-300"
+                     data-testid="po-detail-exceeds">
+                    Nilai PO ini <strong>Rp {(selectedPO.total_value || 0).toLocaleString('id-ID')}</strong> melebihi
+                    nilai permintaan yang sudah disetujui
+                    (<strong>Rp {(selectedPO.pr_approved_value || 0).toLocaleString('id-ID')}</strong>
+                    {selectedPO.from_pr_number ? ` pada ${selectedPO.from_pr_number}` : ''}).
+                    Karena itu PO ini wajib melewati rantai persetujuan penuh.
+                  </p>
+                )}
+                {Array.isArray(selectedPO.approval_steps) && selectedPO.approval_steps.length > 0 && (
+                  <div className="mt-3 border-t border-[var(--glass-border)] pt-2">
+                    <div className="text-xs font-semibold text-foreground mb-1">Riwayat</div>
+                    {selectedPO.approval_steps.map((s, i) => (
+                      <div key={s.id || i} className="flex flex-wrap items-baseline gap-2 text-xs py-0.5">
+                        <span className="text-muted-foreground tabular-nums">
+                          {s.timestamp ? new Date(s.timestamp).toLocaleString('id-ID') : '-'}
+                        </span>
+                        <span className="font-medium text-foreground">{s.action_label || s.action}</span>
+                        <span className="text-muted-foreground">— {s.actor_name}</span>
+                        {s.comment && <span className="text-muted-foreground/80 italic">“{s.comment}”</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-4 text-sm">
               <div>
                 <div className="text-muted-foreground mb-1">Supplier</div>
@@ -923,8 +1074,17 @@ export default function PurchaseOrderModule({ token, onNavigate }) {
                       return (
                         <tr key={it.id} className={`border-b border-[var(--glass-border)] ${idx % 2 === 0 ? 'bg-[var(--glass-bg)]/30' : ''}`}>
                           <td className="py-2">
-                            <div className="font-medium">{it.material_code || (it.material_linked === false ? 'Item bebas' : '')}</div>
-                            <div className="text-xs text-muted-foreground">{it.material_name || it.description}</div>
+                            {/* 2026-08-07 — dulu baris utama adalah KODE material,
+                                sehingga item bebas (jasa / non-master) tampil
+                                berjudul "Item bebas" dan nama barangnya turun ke
+                                baris kecil. Approver yang memutuskan uang perlu
+                                melihat APA yang dibeli lebih dulu, baru kodenya. */}
+                            <div className="font-medium">
+                              {it.material_name || it.description || 'Item tanpa nama'}
+                            </div>
+                            <div className="text-xs text-muted-foreground font-mono">
+                              {it.material_code || (it.material_linked === false ? 'Item bebas (non-master)' : '')}
+                            </div>
                             {hasPack && (
                               <div className="text-[11px] text-[hsl(var(--primary))]">
                                 1 {it.uom} = {Number(f).toLocaleString('id-ID', { maximumFractionDigits: 4 })} {it.base_uom}
@@ -1023,17 +1183,22 @@ export default function PurchaseOrderModule({ token, onNavigate }) {
 
             <div className="flex justify-between gap-2 pt-4 border-t border-[var(--glass-border)]">
               <div>
-                {selectedPO.status === 'draft' && (
-                  <Button onClick={() => { setDetailModal(false); openSubmitModal(selectedPO); }}>
-                    <Send className="w-4 h-4 mr-1.5" /> Ajukan Approval
+                {(selectedPO.status === 'draft' || selectedPO.status === 'rejected') && selectedPO.can_submit !== false && (
+                  <Button onClick={() => { setDetailModal(false); openSubmitModal(selectedPO); }}
+                          data-testid="po-detail-submit">
+                    <Send className="w-4 h-4 mr-1.5" />
+                    {selectedPO.status === 'rejected' ? 'Ajukan Ulang' : 'Ajukan Approval'}
                   </Button>
                 )}
-                {selectedPO.status === 'pending_approval' && (
+                {selectedPO.status === 'pending_approval' && selectedPO.can_approve && (
                   <>
-                    <Button onClick={() => { setDetailModal(false); openApproveModal(selectedPO); }} className="mr-2">
-                      <CheckCircle2 className="w-4 h-4 mr-1.5" /> Setujui
+                    <Button onClick={() => { setDetailModal(false); openApproveModal(selectedPO); }}
+                            className="mr-2" data-testid="po-detail-approve">
+                      <CheckCircle2 className="w-4 h-4 mr-1.5" />
+                      {selectedPO.stage_label ? `Setujui — ${selectedPO.stage_label}` : 'Setujui'}
                     </Button>
-                    <Button variant="secondary" onClick={() => { setDetailModal(false); openRejectModal(selectedPO); }}>
+                    <Button variant="secondary" onClick={() => { setDetailModal(false); openRejectModal(selectedPO); }}
+                            data-testid="po-detail-reject">
                       <XCircle className="w-4 h-4 mr-1.5" /> Tolak
                     </Button>
                   </>
@@ -1070,16 +1235,50 @@ export default function PurchaseOrderModule({ token, onNavigate }) {
 
       {/* Approve Modal */}
       {approveModal && selectedPO && (
-        <Modal onClose={() => setApproveModal(false)} title="Konfirmasi Approval">
+        <Modal onClose={() => setApproveModal(false)} title="Konfirmasi Persetujuan">
           <div className="space-y-4">
-            <p>Apakah Anda yakin ingin menyetujui PO <strong>{selectedPO.po_number}</strong>?</p>
-            <p className="text-sm text-muted-foreground">
-              Setelah disetujui, PO dapat digunakan untuk membuat Goods Receipt di Warehouse.
+            <p>
+              Setujui PO <strong>{selectedPO.po_number}</strong> senilai{' '}
+              <strong>Rp {(selectedPO.total_value || 0).toLocaleString('id-ID')}</strong>?
             </p>
+            {/* Tahap yang SEDANG disetujui harus jelas — approver perlu tahu ini
+                langkah ke berapa dan siapa yang harus memutuskan setelahnya. */}
+            {selectedPO.stage_label && (
+              <div className="rounded-lg bg-amber-50 dark:bg-amber-400/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300">
+                Anda menyetujui tahap <strong>{selectedPO.stage_label}</strong>
+                {selectedPO.total_stages ? ` (${selectedPO.stage_order} dari ${selectedPO.total_stages})` : ''}.
+                {selectedPO.next_stage
+                  ? ` Setelah ini masih menunggu ${selectedPO.next_approver_label}.`
+                  : ' Ini tahap terakhir — PO langsung disetujui penuh.'}
+              </div>
+            )}
+            {selectedPO.is_override && selectedPO.override_note && (
+              <div className="rounded-lg bg-violet-50 dark:bg-violet-400/10 px-3 py-2 text-sm text-violet-800 dark:text-violet-300"
+                   data-testid="po-override-note">
+                {selectedPO.override_note}
+              </div>
+            )}
+            {selectedPO.exceeds_pr_value && (
+              <div className="rounded-lg bg-red-50 dark:bg-red-400/10 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+                Perhatian: nilai PO ini melebihi nilai permintaan yang sudah disetujui
+                (Rp {(selectedPO.pr_approved_value || 0).toLocaleString('id-ID')}).
+              </div>
+            )}
+            <div>
+              <label className="block text-sm font-medium mb-1.5">Catatan persetujuan (opsional)</label>
+              <textarea
+                value={approveNote}
+                onChange={e => setApproveNote(e.target.value)}
+                placeholder="Mis. harga sudah dicek terhadap daftar harga supplier"
+                className="w-full px-3 py-2 rounded-lg border border-[var(--glass-border)] bg-[var(--input-surface)] text-foreground text-sm"
+                rows="2"
+                data-testid="po-approve-note"
+              />
+            </div>
             <div className="flex justify-end gap-2 pt-4">
               <Button variant="secondary" onClick={() => setApproveModal(false)}>Batal</Button>
-              <Button onClick={approvePO} disabled={saving}>
-                {saving ? 'Memproses...' : 'Ya, Setujui'}
+              <Button onClick={approvePO} disabled={saving} data-testid="po-approve-confirm-btn">
+                {saving ? 'Memproses...' : (selectedPO.stage_label ? `Setujui — ${selectedPO.stage_label}` : 'Ya, Setujui')}
               </Button>
             </div>
           </div>

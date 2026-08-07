@@ -48,7 +48,8 @@ CERITA DATA YANG DIBUAT (menampilkan SETIAP tahap rantai sekaligus)
     1. Rp 6.000.000   → 2 tahap, MENUNGGU TAHAP DEPARTEMEN   (giliran gudang@)
     2. Rp 50.000.000  → 3 tahap, MENUNGGU TAHAP KEUANGAN     (giliran finance@)
     3. Rp 50.000.000  → 3 tahap, DISETUJUI PENUH             (siap dijadikan PO)
-    4. Rp 800.000     → 1 tahap, SUDAH JADI PURCHASE ORDER   (Sedang Pengadaan)
+    4. Rp 800.000     → 1 tahap, SUDAH JADI PURCHASE ORDER   (PO menunggu
+                        persetujuan pengadaan → contoh PO di kotak persetujuan)
   Request Pembelian Aksesoris
     5. Rp 30.000.000  → 3 tahap, MENUNGGU TAHAP DEPARTEMEN   (giliran gudang@)
     6. Rp 400.000     → 1 tahap, MENUNGGU TAHAP DEPARTEMEN   (giliran gudang@)
@@ -292,9 +293,16 @@ def build(mats: dict):
                           json={"supplier_id": sup_id,
                                 "notes": f"PO dari PR demo [{MARK}]"}),
                       f"buat PO dari PR '{t4}'")
-            ok(f"{pr['request_number']} Rp 800.000 → PO "
-               f"{po.get('po_number') or po.get('po', {}).get('po_number', '?')} "
-               f"({sup_name})")
+            po_id = po.get("id")
+            po_no = po.get("po_number") or "?"
+            # 2026-08-07 — PO sekarang punya rantai persetujuannya sendiri.
+            # Diajukan lalu DIBIARKAN MENUNGGU supaya owner melihat contoh
+            # "Purchase Order menunggu persetujuan" di kotak persetujuan
+            # gabungan (dulu PO tidak pernah muncul di sana sama sekali).
+            r = must(api("POST", f"/api/rahaza/purchase-orders/{po_id}/submit", ADMIN, json={}),
+                     f"ajukan PO {po_no}")
+            ok(f"{pr['request_number']} Rp 800.000 → PO {po_no} ({sup_name}) "
+               f"— diajukan, menunggu {r.get('stage_label') or 'persetujuan'}")
         created.append(pr["request_number"])
 
     # ── 5. PR Aksesoris Rp 30.000.000 → 3 tahap, menunggu DEPARTEMEN ────────

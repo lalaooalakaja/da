@@ -911,16 +911,17 @@ async def get_approval_inbox(
 
     if scope == "mine":
         # Request Aksesoris milik saya juga harus bisa dilacak di satu tempat.
-        from core.pr_approval import normalize_acc_pr
+        from core.pr_approval import acc_material_map, normalize_acc_pr
         accs = await db.acc_purchase_requests.find(
             {"status": "Submitted", "requested_by": user["id"]}, {"_id": 0}
         ).to_list(500)
         cfgc = cfg
+        mats = await acc_material_map(db, accs)
         for d in accs:
             chain = _pr_chain(d, cfgc)
             ev = _eval_approval(d, _u, chain,
                                 stage=d.get("current_approver_stage") or STAGE_DEPT)
-            out = _ser(normalize_acc_pr(d))
+            out = _ser(normalize_acc_pr(d, mats))
             out.update(ev)
             result.append(out)
     return result
@@ -1050,6 +1051,18 @@ async def create_po_from_pr(req_id: str, request: Request):
         raise HTTPException(400, "PR tidak punya item yang bisa dijadikan PO.")
 
     po_number = await _po_number(db)
+    po_total = round(sum(float(i["qty_ordered"]) * float(i["unit_cost"])
+                         for i in po_items), 2)
+    pr_total = round(float(pr.get("total_estimated") or 0), 2)
+    # ── LUBANG YANG DITUTUP 2026-08-07 ──────────────────────────────────────
+    # `items_override` boleh mengubah qty DAN unit_cost tanpa batas, sehingga PR
+    # Rp 800.000 yang sudah disetujui bisa diterbitkan menjadi PO Rp 800.000.000
+    # ke supplier — uang yang dikomitmenkan jauh melebihi yang pernah disetujui.
+    # Sekarang selisihnya DICATAT di dokumen; `core.pr_approval.po_chain()`
+    # memakai penanda ini untuk MEMAKSA rantai persetujuan PENUH (bukan 1 tahap),
+    # dan kotak persetujuan menampilkan peringatannya ke approver.
+    # Toleransi 0,5% mengikuti ambang varians 3-Way Match (pembulatan satuan).
+    exceeds = po_total > pr_total * 1.005 if pr_total > 0 else po_total > 0
     po_doc = {
         "id": _uid(),
         "po_number": po_number,
@@ -1059,11 +1072,24 @@ async def create_po_from_pr(req_id: str, request: Request):
         "po_date": _date.today().isoformat(),
         "expected_delivery_date": body.get("expected_delivery_date") or pr.get("needed_by") or None,
         "items": po_items,
-        "total_value": round(sum(float(i["qty_ordered"]) * float(i["unit_cost"])
-                                 for i in po_items), 2),
+        "total_value": po_total,
         "status": "draft",
         "notes": (body.get("notes") or "").strip() or f"Dibuat dari PR {pr.get('request_number','')}",
-        "approval_flow_key": "single_step",
+        # Jejak perbandingan nilai: dipakai memaksa rantai persetujuan penuh
+        # dan menampilkan peringatan ke approver di kotak persetujuan.
+        "pr_approved_value": pr_total,
+        "exceeds_pr_value": bool(exceeds),
+        "approval_flow_key": "value_based",
+        "approval_steps": [],
+        "approval_chain": [],
+        "current_approver_stage": None,
+        "requested_by": user["id"],
+        # CATATAN SENGAJA: `department` TIDAK diisi untuk PO. Aturan departemen di
+        # `eval_approval` hanya berlaku bila dokumen DAN user punya departemen;
+        # kalau PO mewarisi departemen PR (mis. "Gudang"), maka `admin_pengadaan`
+        # (departemen Pengadaan) justru TERBLOKIR menyetujui PO pengadaan.
+        # Departemen asal disimpan hanya untuk INFORMASI.
+        "source_department": (pr.get("department") or "").strip(),
         "approvals": [],
         "created_by": user["id"],
         "created_by_name": user.get("name", ""),

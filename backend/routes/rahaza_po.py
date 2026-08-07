@@ -46,27 +46,94 @@ PO_STATUSES = ["draft", "pending_approval", "approved", "partially_received", "f
 
 
 async def _require_admin(request: Request):
-    """Require admin, warehouse, purchasing, manager, or owner role."""
-    user = await require_auth(request)
-    role = (user.get("role") or "").lower()
-    if role in ("superadmin", "admin", "owner", "manager"):
-        return user
-    perms = user.get("_permissions") or []
-    if "*" in perms or "purchasing.manage" in perms or "warehouse.manage" in perms:
-        return user
-    raise HTTPException(403, "Forbidden: butuh permission purchasing / warehouse / manager.")
+    """Boleh MENGELOLA PO (buat / ubah / ajukan / batalkan / buat GR).
+
+    BUG 2026-08-07: daftar peran di sini ditulis sendiri —
+    ("superadmin", "admin", "owner", "manager") — dan dari empat itu HANYA
+    `superadmin` yang benar-benar ada di aplikasi ini. Akibatnya `admin_pengadaan`,
+    `manager_pengadaan`, `purchasing`, dan `admin_gudang` TIDAK BISA membuat atau
+    mengajukan PO sama sekali, padahal pintu "Purchase Order" tampil di menu
+    Portal Pengadaan mereka. Sekarang memakai gerbang SSOT `routes.shared`.
+    """
+    from routes.shared import PORTAL_ACCESS, require_perm
+    return await require_perm(
+        request, 'purchasing.manage', 'proc.po.manage', 'warehouse.manage',
+        legacy_roles=('manager_pengadaan', 'admin_pengadaan', 'purchasing',
+                      'admin_gudang', 'manager', 'dept_head',
+                      'owner', 'admin', 'superadmin')
+        + tuple(PORTAL_ACCESS.get('procurement', ())),
+        message='Akses ditolak: butuh izin mengelola Purchase Order.')
 
 
-async def _require_approver(request: Request):
-    """Require manager, owner, or superadmin for approval."""
-    user = await require_auth(request)
-    role = (user.get("role") or "").lower()
-    if role in ("superadmin", "owner", "manager", "production_manager", "warehouse_manager"):
-        return user
-    perms = user.get("_permissions") or []
-    if "*" in perms or "purchasing.approve" in perms:
-        return user
-    raise HTTPException(403, "Forbidden: hanya Manager/Owner yang boleh approve PO.")
+# ═══════════════════════════════════════════════════════════════════════════
+# PERSETUJUAN PO — memakai mesin YANG SAMA dengan Permintaan Pengadaan
+# (core/pr_approval.py). Menutup lubang yang DIBUKTIKAN 2026-08-07:
+#
+#   · `_require_approver` lama memakai daftar peran karangan sendiri
+#     ("superadmin","owner","manager","production_manager","warehouse_manager");
+#     hanya `superadmin` yang benar-benar ada ⇒ `direktur@` (approver TERTINGGI),
+#     `finance@`, dan `gudang@` semuanya 403. Persetujuan PO MATI di praktik.
+#   · TIDAK ADA larangan menyetujui PO sendiri: `admin@garment.com` terbukti
+#     bisa submit LALU approve PO yang SAMA — komitmen uang ke supplier
+#     sendirian, tanpa mata kedua.
+#   · Satu tahap saja, tidak mengikuti nilai, tanpa notifikasi, tanpa jejak
+#     audit per tahap, dan PO tidak pernah muncul di kotak persetujuan.
+#   · Penolakan boleh tanpa alasan (frontend malah mengisi otomatis
+#     "Tidak ada alasan"), jadi pemohon tidak pernah tahu apa yang salah.
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _po_ctx(db, po_id: str, user: dict):
+    """PO + rantai + hak persetujuan user atasnya (SSOT)."""
+    from core.pr_approval import (
+        PO_STAGE_LABELS, PO_STAGE_ROLE_LABELS, PO_STAGE_ROLES, STAGE_DEPT,
+        chain_config, eval_approval, po_chain, with_department,
+    )
+    po = await db.rahaza_purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(404, "PO tidak ditemukan.")
+    cfg = await chain_config(db)
+    chain = po_chain(po, cfg)
+    stage = po.get("current_approver_stage") if po.get("status") == "pending_approval" else None
+    if po.get("status") == "pending_approval" and not stage:
+        stage = STAGE_DEPT
+    u = await with_department(db, user)
+    ev = eval_approval(po, u, chain, stage=stage, roles_map=PO_STAGE_ROLES,
+                       labels=PO_STAGE_LABELS, role_labels=PO_STAGE_ROLE_LABELS)
+    return po, chain, ev, cfg
+
+
+async def _po_flags(db, user, pos: list):
+    """Tempelkan flag izin SERVER ke daftar/detail PO.
+
+    Frontend DILARANG menebak dari status/peran — sampai 2026-08-07 tabel PO
+    merender tombol Setujui/Tolak untuk SIAPA PUN yang login (hanya digating
+    `po.status === 'pending_approval'`), lalu backend membalas 403. Itu membuat
+    tombol yang tampak bisa dipakai tapi selalu gagal.
+    """
+    from core.pr_approval import (
+        PO_STAGE_LABELS, PO_STAGE_ROLE_LABELS, PO_STAGE_ROLES, STAGE_DEPT,
+        chain_config, eval_approval, po_chain, with_department,
+    )
+    cfg = await chain_config(db)
+    u = await with_department(db, user)
+    role = (u.get("role") or "").lower()
+    for po in pos:
+        chain = po_chain(po, cfg)
+        stage = po.get("current_approver_stage") if po.get("status") == "pending_approval" else None
+        if po.get("status") == "pending_approval" and not stage:
+            stage = STAGE_DEPT
+        po.update(eval_approval(po, u, chain, stage=stage, roles_map=PO_STAGE_ROLES,
+                                labels=PO_STAGE_LABELS,
+                                role_labels=PO_STAGE_ROLE_LABELS))
+        po["can_submit"] = po.get("status") in ("draft", "rejected")
+        po["is_creator"] = bool(u.get("id")) and po.get("created_by") == u.get("id")
+        po["kind"] = "po"
+        po["kind_label"] = "Purchase Order"
+        po["api_base"] = "/api/rahaza/purchase-orders"
+        po["stage_labels_source"] = "server"
+        if role in ("superadmin", "admin", "owner"):
+            po["can_submit"] = po.get("status") in ("draft", "rejected")
+    return pos
 
 
 async def _gen_po_number(db) -> str:
@@ -327,7 +394,7 @@ async def list_pos(
     limit: int = Query(50, ge=1, le=500),
     paginate: bool = Query(False, description="true → bentuk {items, pagination}"),
 ):
-    await require_auth(request)
+    user = await require_auth(request)
     db = get_db()
     q = {}
     if status:
@@ -367,6 +434,10 @@ async def list_pos(
                                         for i in (po.get("items") or [])) * 100), 2
         ) if sum(float(i.get("qty_ordered") or 0) for i in (po.get("items") or [])) else 0.0
 
+    # Flag izin dari SERVER (SSOT). Tabel PO dulu merender Setujui/Tolak untuk
+    # SIAPA PUN yang login lalu backend membalas 403 — tombol yang tampak bisa
+    # dipakai tapi selalu gagal.
+    await _po_flags(db, user, rows)
     if paginate:
         return serialize_doc({
             "items": rows,
@@ -384,6 +455,9 @@ async def get_po(po_id: str, request: Request):
     if not po:
         raise HTTPException(404, "PO tidak ditemukan.")
     await _enrich_po(db, po)
+    # Flag izin dari SERVER (SSOT) supaya UI tidak menebak dari status/peran.
+    from auth import require_auth as _ra
+    await _po_flags(db, await _ra(request), [po])
     return serialize_doc(po)
 
 
@@ -495,7 +569,15 @@ async def delete_po(po_id: str, request: Request):
 
 @router.post("/purchase-orders/{po_id}/submit")
 async def submit_po(po_id: str, request: Request):
-    """Submit PO for approval (draft → pending_approval)."""
+    """Ajukan PO untuk persetujuan (draft → pending_approval).
+
+    Rantai tahapnya DIBEKUKAN di sini berdasarkan nilai PO + ambang yang diatur
+    owner, jadi mengubah ambang tidak menggeser PO yang sudah berjalan.
+    """
+    from core.pr_approval import (
+        PO_STAGE_LABELS, PO_STAGE_ROLE_LABELS, PO_STAGE_ROLES, STAGE_DEPT,
+        chain_config, notify_stage_approvers, po_chain,
+    )
     user = await _require_admin(request)
     db = get_db()
     po = await db.rahaza_purchase_orders.find_one({"id": po_id}, {"_id": 0})
@@ -503,94 +585,198 @@ async def submit_po(po_id: str, request: Request):
         raise HTTPException(404, "PO tidak ditemukan.")
     if po.get("status") not in ("draft", "rejected"):
         raise HTTPException(400, f"Hanya PO Draft/Rejected yang bisa diajukan. Status: {po.get('status')}")
-    
+
+    cfg = await chain_config(db)
+    # Rantai dihitung dari dokumen TANPA `approval_chain` lama supaya pengajuan
+    # ulang setelah ditolak memakai nilai terbaru.
+    chain = po_chain({k: v for k, v in po.items() if k != "approval_chain"}, cfg)
+    step = {
+        "id": _uid(), "step": "submit", "stage": None,
+        "actor_id": user["id"],
+        "actor_name": user.get("name", "") or user.get("email", ""),
+        "actor_role": (user.get("role") or "").lower(),
+        "action": "submitted", "action_label": "Diajukan", "comment": "",
+        "timestamp": _now().isoformat(),
+    }
     await db.rahaza_purchase_orders.update_one(
         {"id": po_id},
-        {
-            "$set": {
-                "status": "pending_approval",
-                "submitted_at": _now(),
-                "submitted_by": user["id"],
-                "updated_at": _now(),
-            }
-        }
+        {"$set": {
+            "status": "pending_approval",
+            "submitted_at": _now(),
+            "submitted_by": user["id"],
+            # WAJIB untuk pemisahan wewenang: mesin persetujuan memakai
+            # `requested_by` untuk menolak "pembuat menyetujui sendiri".
+            "requested_by": po.get("created_by") or user["id"],
+            "approval_chain": chain,
+            "approval_thresholds": dict(cfg),
+            "current_approver_stage": STAGE_DEPT,
+            "approval_steps": [step],
+            "rejected_reason": None,
+            "updated_at": _now(),
+        }}
     )
+    after = {**po, "status": "pending_approval", "approval_chain": chain}
+    await notify_stage_approvers(
+        db, after, STAGE_DEPT, chain, module_id="proc-purchase-orders",
+        number=po.get("po_number", ""),
+        title=f"PO ke {po.get('vendor_name') or 'supplier'}",
+        kind_label="Purchase Order", roles_map=PO_STAGE_ROLES,
+        labels=PO_STAGE_LABELS, value_field="total_value")
     await log_activity(user["id"], user.get("name", ""), "submit", "rahaza.po", po["po_number"])
     out = await db.rahaza_purchase_orders.find_one({"id": po_id}, {"_id": 0})
     await _enrich_po(db, out)
+    await _po_flags(db, user, [out])
+    out["stage_label"] = PO_STAGE_LABELS.get(STAGE_DEPT, "")
+    out["next_approver_label"] = PO_STAGE_ROLE_LABELS.get(STAGE_DEPT, "")
+    out["total_stages"] = len(chain)
     return serialize_doc(out)
 
 
 @router.post("/purchase-orders/{po_id}/approve")
 async def approve_po(po_id: str, request: Request):
-    """Approve PO (pending_approval → approved).
-    
-    Untuk single-step workflow: langsung approved.
-    Untuk multi-step: catat approval step (future enhancement).
+    """Setujui SATU TAHAP persetujuan PO.
+
+    Gerbangnya `core.pr_approval.eval_approval` (SSOT): peran tahap, larangan
+    menyetujui PO sendiri, larangan satu orang menyetujui dua tahap, dan
+    override admin yang TERCATAT.
     """
-    user = await _require_approver(request)
-    db = get_db()
-    po = await db.rahaza_purchase_orders.find_one({"id": po_id}, {"_id": 0})
-    if not po:
-        raise HTTPException(404, "PO tidak ditemukan.")
-    if po.get("status") != "pending_approval":
-        raise HTTPException(400, f"Hanya PO Pending Approval yang bisa di-approve. Status: {po.get('status')}")
-    
-    # Record approval
-    approval_record = {
-        "user_id": user["id"],
-        "user_name": user.get("name", ""),
-        "approved_at": _now(),
-        "step": "final",  # untuk single-step; multi-step bisa tambah logic
-    }
-    
-    await db.rahaza_purchase_orders.update_one(
-        {"id": po_id},
-        {
-            "$set": {
-                "status": "approved",
-                "approved_at": _now(),
-                "approved_by": user["id"],
-                "updated_at": _now(),
-            },
-            "$push": {"approvals": approval_record},
-        }
+    from core.pr_approval import (
+        PO_STAGE_LABELS, PO_STAGE_ROLES, next_stage_after, notify_requester,
+        notify_stage_approvers,
     )
-    await log_activity(user["id"], user.get("name", ""), "approve", "rahaza.po", po["po_number"])
+    user = await require_auth(request)
+    db = get_db()
+    po, chain, ev, _cfg = await _po_ctx(db, po_id, user)
+    if po.get("status") != "pending_approval":
+        raise HTTPException(400, f"Hanya PO Menunggu Persetujuan yang bisa disetujui. Status: {po.get('status')}")
+    if not ev["can_approve"]:
+        raise HTTPException(403, ev["blocked_reason"]
+                            or "Akses ditolak: Anda tidak berhak menyetujui PO ini.")
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    comment = (body.get("comment") or body.get("notes") or "").strip()
+
+    stage = ev["stage"]
+    nxt = next_stage_after(chain, stage)
+    label = f"Disetujui — {PO_STAGE_LABELS.get(stage, stage)}"
+    if ev["is_override"]:
+        label += " (override admin)"
+    step = {
+        "id": _uid(), "step": stage, "stage": stage,
+        "actor_id": user["id"],
+        "actor_name": user.get("name", "") or user.get("email", ""),
+        "actor_role": (user.get("role") or "").lower(),
+        "action": "approved", "action_label": label, "comment": comment,
+        "override": bool(ev["is_override"]),
+        "override_reasons": list(ev["override_reasons"]),
+        "timestamp": _now().isoformat(),
+    }
+    upd = {"current_approver_stage": nxt, "approval_chain": chain, "updated_at": _now()}
+    if not nxt:
+        upd.update({"status": "approved", "approved_at": _now(),
+                    "approved_by": user["id"]})
+    await db.rahaza_purchase_orders.update_one(
+        {"id": po_id}, {"$set": upd, "$push": {"approval_steps": step,
+                                               "approvals": {
+                                                   "user_id": user["id"],
+                                                   "user_name": user.get("name", ""),
+                                                   "approved_at": _now(),
+                                                   "step": stage}}})
+    after = {**po, **upd}
+    if nxt:
+        await notify_stage_approvers(
+            db, after, nxt, chain, module_id="proc-purchase-orders",
+            number=po.get("po_number", ""),
+            title=f"PO ke {po.get('vendor_name') or 'supplier'}",
+            kind_label="Purchase Order", roles_map=PO_STAGE_ROLES,
+            labels=PO_STAGE_LABELS, value_field="total_value")
+    else:
+        await notify_requester(
+            db, after, severity="success", module_id="proc-purchase-orders",
+            number=po.get("po_number", ""),
+            title="Purchase Order Anda disetujui penuh",
+            body=(f"{po.get('po_number', '')} — {po.get('vendor_name', '')}\n"
+                  "Semua tahap persetujuan selesai. Langkah berikutnya: "
+                  "kirim ke supplier & catat penerimaan barang."))
+    await log_activity(user["id"], user.get("name", ""),
+                       f"approve:{stage}", "rahaza.po", po["po_number"])
     out = await db.rahaza_purchase_orders.find_one({"id": po_id}, {"_id": 0})
     await _enrich_po(db, out)
+    await _po_flags(db, user, [out])
+    out["stage_approved"] = stage
+    out["next_stage"] = nxt
+    out["next_stage_label"] = PO_STAGE_LABELS.get(nxt, "") if nxt else ""
+    out["override"] = bool(ev["is_override"])
     return serialize_doc(out)
+
+
+@router.get("/purchase-orders/{po_id}/timeline")
+async def po_timeline(po_id: str, request: Request):
+    """Jejak audit persetujuan PO: siapa, tahap apa, kapan, komentar, override."""
+    user = await require_auth(request)
+    db = get_db()
+    po, _chain, ev, _cfg = await _po_ctx(db, po_id, user)
+    return serialize_doc({
+        "steps": po.get("approval_steps", []),
+        "current_status": po.get("status"),
+        "chain": ev["chain"], "approval_chain": ev["approval_chain"],
+        "total_stages": ev["total_stages"], "stage": ev["stage"],
+        "stage_label": ev["stage_label"],
+        "next_approver_label": ev["next_approver_label"],
+    })
 
 
 @router.post("/purchase-orders/{po_id}/reject")
 async def reject_po(po_id: str, request: Request):
-    """Reject PO (pending_approval → rejected)."""
-    user = await _require_approver(request)
+    """Tolak PO (pending_approval → rejected). ALASAN WAJIB."""
+    from core.pr_approval import PO_STAGE_LABELS, notify_requester
+    user = await require_auth(request)
     db = get_db()
-    body = await request.json()
-    reason = body.get("reason") or "Tidak ada alasan"
-    
-    po = await db.rahaza_purchase_orders.find_one({"id": po_id}, {"_id": 0})
-    if not po:
-        raise HTTPException(404, "PO tidak ditemukan.")
+    po, _chain, ev, _cfg = await _po_ctx(db, po_id, user)
     if po.get("status") != "pending_approval":
-        raise HTTPException(400, f"Hanya PO Pending Approval yang bisa di-reject. Status: {po.get('status')}")
-    
+        raise HTTPException(400, f"Hanya PO Menunggu Persetujuan yang bisa ditolak. Status: {po.get('status')}")
+    if not ev["can_reject"]:
+        raise HTTPException(403, ev["blocked_reason"]
+                            or "Akses ditolak: Anda tidak berhak menolak PO ini.")
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    reason = (body.get("reason") or body.get("comment") or "").strip()
+    if not reason:
+        raise HTTPException(400, "Alasan penolakan wajib diisi agar pembuat PO tahu "
+                                 "apa yang harus diperbaiki.")
+    label = f"Ditolak — {PO_STAGE_LABELS.get(ev['stage'], ev['stage'] or '')}"
+    if ev["is_override"]:
+        label += " (override admin)"
+    step = {
+        "id": _uid(), "step": ev["stage"], "stage": ev["stage"],
+        "actor_id": user["id"],
+        "actor_name": user.get("name", "") or user.get("email", ""),
+        "actor_role": (user.get("role") or "").lower(),
+        "action": "rejected", "action_label": label, "comment": reason,
+        "override": bool(ev["is_override"]),
+        "override_reasons": list(ev["override_reasons"]),
+        "timestamp": _now().isoformat(),
+    }
     await db.rahaza_purchase_orders.update_one(
         {"id": po_id},
-        {
-            "$set": {
-                "status": "rejected",
-                "rejected_at": _now(),
-                "rejected_by": user["id"],
-                "rejected_reason": reason,
-                "updated_at": _now(),
-            }
-        }
-    )
+        {"$set": {"status": "rejected", "rejected_at": _now(),
+                  "rejected_by": user["id"], "rejected_reason": reason,
+                  "current_approver_stage": None, "updated_at": _now()},
+         "$push": {"approval_steps": step}})
+    await notify_requester(
+        db, {**po, "status": "rejected"}, severity="warning",
+        module_id="proc-purchase-orders", number=po.get("po_number", ""),
+        title="Purchase Order Anda ditolak",
+        body=(f"{po.get('po_number', '')} — {po.get('vendor_name', '')}\n"
+              f"Tahap: {PO_STAGE_LABELS.get(ev['stage'], '-')}\nAlasan: {reason}"))
     await log_activity(user["id"], user.get("name", ""), f"reject:{reason}", "rahaza.po", po["po_number"])
     out = await db.rahaza_purchase_orders.find_one({"id": po_id}, {"_id": 0})
     await _enrich_po(db, out)
+    await _po_flags(db, user, [out])
     return serialize_doc(out)
 
 

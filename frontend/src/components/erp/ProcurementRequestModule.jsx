@@ -893,6 +893,18 @@ function PRCard({ it, onOpen, onQuickApprove, quickBusy, showChain = true }) {
                 <Package size={9} /> Aksesoris
               </span>
             )}
+            {/* 2026-08-07 — Purchase Order ikut ke kotak persetujuan gabungan.
+                PO adalah KOMITMEN UANG ke supplier, jadi harus mudah dikenali. */}
+            {it.kind === 'po' && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-sky-300 bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:border-sky-400/30 dark:bg-sky-400/10 dark:text-sky-400">
+                <ShoppingCart size={9} /> Purchase Order
+              </span>
+            )}
+            {it.exceeds_pr_value && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-red-300 bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-400">
+                Melebihi nilai PR
+              </span>
+            )}
             {it.can_approve && (
               <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:border-emerald-400/30 dark:bg-emerald-400/10 dark:text-emerald-400">
                 <CheckCircle2 size={9} /> Perlu keputusan Anda

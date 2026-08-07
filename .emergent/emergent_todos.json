@@ -24,15 +24,23 @@
     "status": "completed"
   },
   {
-    "content": "Phase A: Complete the PENDING testing_agent verification of acc-PR -> procurement",
+    "content": "Phase A: Complete the PENDING testing_agent verification (backend 16/16, 0 critical)",
+    "status": "completed"
+  },
+  {
+    "content": "Phase A: Fix bugs found — acc item rows blank Rp 0, finance 403 on 3-Way Match",
+    "status": "completed"
+  },
+  {
+    "content": "Phase A: Finish UI checks testing agent skipped (detail dialog, quick approve, dashboard KPI, 9 doors)",
+    "status": "completed"
+  },
+  {
+    "content": "Phase B: Read rahaza_po.py approval flow + map the security gap",
     "status": "in_progress"
   },
   {
-    "content": "Phase A: Fix all bugs reported by testing agent",
-    "status": "pending"
-  },
-  {
-    "content": "Phase B: Migrate PO approval (rahaza_po.py) to SSOT core/pr_approval engine + RBAC/SoD",
+    "content": "Phase B: Migrate PO approval to SSOT core/pr_approval engine + RBAC/SoD",
     "status": "pending"
   },
   {
@@ -60,7 +68,7 @@
     "status": "pending"
   },
   {
-    "content": "Update plan.md / test_result.md / memory docs at end of each phase",
+    "content": "Update plan.md at end of each phase",
     "status": "pending"
   }
 ]
