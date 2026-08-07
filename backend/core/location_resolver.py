@@ -17,6 +17,9 @@ TIDAK menyentuh agregasi stok (onhand_map dkk. tetap lintas-lokasi = aman untuk
 Marketing/BOM/Produksi/Finance). Modul ini murni soal IDENTITAS & TAMPILAN lokasi.
 """
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Peran storage → daftar kode zona wh_* kandidat (urutan = prioritas match).
 # Selaras dgn CANONICAL_STORAGE_ZONES di routes/wms_structure.py.
@@ -292,8 +295,11 @@ async def storage_location_index(db) -> dict:
                 kind = zone_kind.get(p.get("zone_id"))
                 if kind:
                     _put(p["id"], p.get("barcode") or p.get("label"), p.get("label"), "wh_position", kind)
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001 — indeks lokasi tetap berguna tanpa bin,
+        # tetapi bin yang hilang membuat lokasi tampil sebagai id mentah di UI dan
+        # bisa dianggap "lokasi tak dikenal" oleh penjaga stok. Dulu `pass` senyap.
+        logger.warning("[lokasi] gagal memuat bin (wh_positions) — bin tidak akan "
+                       "muncul di daftar/penamaan lokasi: %s", e)
 
     # 3) Lokasi legacy `rahaza_locations` --------------------------------------
     try:

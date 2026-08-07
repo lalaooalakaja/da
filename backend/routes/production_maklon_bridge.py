@@ -388,8 +388,11 @@ async def mature_ap_from_cmt_receipt(db, receipt_id: str, user: dict) -> dict:
             f"AP CMT {payment_code} — {receipt.get('cmt_name','')} — Rp {subtotal:,.0f} "
             f"({total_pcs} pcs actual, {total_rejected} pcs reject)"
         )
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001 — jejak aktivitas tidak boleh membatalkan
+        # pematangan AP yang sudah tercatat, tapi hilangnya jejak audit uang
+        # harus terlihat (dulu `pass` tanpa suara).
+        logger.warning("[cmt] gagal mencatat jejak aktivitas pematangan AP %s: %s",
+                       payment_code, e)
 
     return {
         'ok': True,
@@ -507,8 +510,9 @@ async def try_auto_close_po_on_full(db, po_id: str, user: dict) -> dict:
                                'Auto-Close PO', 'Production PO',
                                f"PO {po.get('po_number')} auto-Completed (fulfilled "
                                f"{f['total_received']}/{f['total_ordered']} pcs).")
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 — PO sudah tertutup; hanya jejaknya gagal.
+            logger.warning("[maklon] gagal mencatat jejak aktivitas auto-close PO %s: %s",
+                           po.get('po_number'), e)
         return {'closed': True, 'status': 'Completed', 'fulfillment': f}
     except Exception:
         logger.exception('try_auto_close_po_on_full failed for PO %s', po_id)
@@ -595,8 +599,9 @@ async def finalize_ar_on_short_close(db, po: dict, user: dict, fulfillment: dict
                                'Create Credit Note', 'Maklon Finance',
                                f"Credit note {cn_number} — PO {po.get('po_number')} — "
                                f"Rp {short_amount:,.0f} ({qty_short} pcs short).")
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 — nota kredit sudah dibuat; hanya jejaknya gagal.
+            logger.warning("[maklon] gagal mencatat jejak aktivitas nota kredit %s: %s",
+                           cn_number, e)
         return {'credit_note_created': True, 'credit_note_id': cn_id,
                 'credit_note_number': cn_number, 'amount': short_amount,
                 'ar_status': ar_status}

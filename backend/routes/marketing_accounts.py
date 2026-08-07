@@ -64,13 +64,18 @@ async def create_platform_account(data: PlatformAccountCreate, request: Request)
     }
     
     await db.marketing_platform_accounts.insert_one(account)
-    # Phase 6: auto-create COA subledger (Piutang per-channel) — idempotent, non-fatal
+    # Phase 6: auto-create COA subledger (Piutang per-channel) — idempotent, non-fatal.
+    # 2026-08-07 — DULU `except Exception: pass`. Channel marketing tanpa subledger
+    # piutang berarti penjualan channel itu tidak punya akun Buku Besar sendiri.
     try:
         from routes.coa_auto import ensure_subledger_for_entity
         _u = getattr(request.state, 'user', {}) or {}
         await ensure_subledger_for_entity(db, "channel", account, _u)
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "[coa] subledger piutang channel GAGAL dibuat untuk %s — penjualan channel "
+            "ini tidak punya akun Buku Besar: %s",
+            account.get("account_name") or account.get("id"), e)
     
     await log_activity(
         getattr(request.state, 'user', {}).get("id", "system"),

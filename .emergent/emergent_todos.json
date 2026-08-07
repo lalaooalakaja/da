@@ -1,74 +1,34 @@
 [
   {
-    "content": "Phase A: Restore repo + bootstrap environment (backend healthy, FE served, logins OK)",
+    "content": "Phase A: Restore repo + bootstrap + verify POC/gate + fix 3 new bugs + complete pending verification",
     "status": "completed"
   },
   {
-    "content": "Phase A: Re-run POC scripts/poc_approval_chain.py (92 checks) in fresh env",
+    "content": "Phase B: PO approval → SSOT engine + money-hole guard + UI flags (POC 28/28, testing agent 0 critical)",
     "status": "completed"
   },
   {
-    "content": "Phase A: Fix ghost-collection bug (acc PR never counted in Procurement Dashboard/supplier migration)",
+    "content": "Phase C: Kill remaining count_documents()+1 numbering races (4 sites incl. 1 found by improved guard)",
     "status": "completed"
   },
   {
-    "content": "Phase A: Re-create approval demo data as IDEMPOTENT seeder + wire into bootstrap.sh",
+    "content": "Phase C: Add DB-level unique indexes for 17 numbered fields + CC7 runtime guard + SSOT-driven CC2",
     "status": "completed"
   },
   {
-    "content": "Phase A: Fix flaky INV-4 guardrail (raw qty read + guessed quarantine location)",
-    "status": "completed"
-  },
-  {
-    "content": "Phase A: Run bash scripts/gate.sh (13 gates) — GREEN 13/13",
-    "status": "completed"
-  },
-  {
-    "content": "Phase A: Complete the PENDING testing_agent verification (backend 16/16, 0 critical)",
-    "status": "completed"
-  },
-  {
-    "content": "Phase A: Fix bugs found — acc item rows blank Rp 0, finance 403 on 3-Way Match",
-    "status": "completed"
-  },
-  {
-    "content": "Phase A: Finish UI checks testing agent skipped (detail dialog, quick approve, dashboard KPI, 9 doors)",
-    "status": "completed"
-  },
-  {
-    "content": "Phase B: Read rahaza_po.py approval flow + map the security gap",
+    "content": "Phase D: Inventory `except Exception: pass` on stock/money paths and rank by risk",
     "status": "in_progress"
   },
   {
-    "content": "Phase B: Migrate PO approval to SSOT core/pr_approval engine + RBAC/SoD",
+    "content": "Phase D: Replace silent swallows with logging / surfaced errors on stock & money paths",
     "status": "pending"
   },
   {
-    "content": "Phase B: Frontend PO approval UI follows server flags (can_approve/blocked_reason/stepper)",
+    "content": "Phase D: Verification + testing agent for Phase C + D",
     "status": "pending"
   },
   {
-    "content": "Phase B: POC + testing agent verification for PO approval",
-    "status": "pending"
-  },
-  {
-    "content": "Phase C: Adopt utils/counters.py SSOT for document numbering (kill count_documents()+1 races)",
-    "status": "pending"
-  },
-  {
-    "content": "Phase C: Concurrency verification (no duplicate document numbers) + testing agent",
-    "status": "pending"
-  },
-  {
-    "content": "Phase D: Eliminate silent `except Exception: pass` on stock/money paths (log + surface errors)",
-    "status": "pending"
-  },
-  {
-    "content": "Phase D: Verification + testing agent for silent-failure fixes",
-    "status": "pending"
-  },
-  {
-    "content": "Update plan.md at end of each phase",
+    "content": "Update plan.md with Phase A/B/C/D status",
     "status": "pending"
   }
 ]

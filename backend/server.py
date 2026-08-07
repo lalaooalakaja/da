@@ -1037,6 +1037,17 @@ async def create_indexes():
     except Exception as e:
         logger.warning(f"Index creation warning: {e}")
 
+    # ── JARING PENGAMAN NOMOR DOKUMEN (2026-08-07) ───────────────────────────
+    # SENGAJA di blok try SENDIRI: bila digabung dengan blok di atas, satu index
+    # yang gagal akan MELEWATI semua index sesudahnya tanpa jejak yang jelas.
+    # Fungsi ini tidak pernah melempar; ia melaporkan koleksi yang masih memuat
+    # nomor dokumen kembar beserta nomornya agar bisa ditindak.
+    try:
+        from utils.counters import ensure_unique_number_indexes
+        await ensure_unique_number_indexes(db, logger)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[nomor-dokumen] gagal memasang index unik: {e}")
+
 @app.on_event("shutdown")
 async def shutdown():
     try:

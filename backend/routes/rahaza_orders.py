@@ -14,6 +14,9 @@ from routes.rahaza_audit import log_audit
 import uuid
 from datetime import datetime, timezone, date
 from typing import Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/rahaza", tags=["rahaza-orders"])
 
@@ -81,12 +84,17 @@ async def create_customer(request: Request):
         "created_at": _now(), "updated_at": _now(),
     }
     await db.rahaza_customers.insert_one(doc)
-    # Phase 6: auto-create COA subledger (Piutang per-pelanggan) — idempotent, non-fatal
+    # Phase 6: auto-create COA subledger (Piutang per-pelanggan) — idempotent, non-fatal.
+    # 2026-08-07 — DULU `except Exception: pass`. Pelanggan tanpa subledger piutang
+    # berarti tagihannya tidak punya akun Buku Besar sendiri; saldo piutang
+    # per-pelanggan jadi tidak bisa ditelusuri. Tetap non-fatal, tapi tercatat.
     try:
         from routes.coa_auto import ensure_subledger_for_entity
         await ensure_subledger_for_entity(db, "customer", doc, user)
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.error("[coa] subledger piutang GAGAL dibuat untuk pelanggan %s (%s) — "
+                     "saldo piutang pelanggan ini tidak punya akun Buku Besar: %s",
+                     doc.get("name") or doc.get("id"), code, e)
     await log_activity(user["id"], user.get("name", ""), "create", "rahaza.customer", code)
     out = await db.rahaza_customers.find_one({"id": doc["id"]}, {"_id": 0})
     return serialize_doc(out)

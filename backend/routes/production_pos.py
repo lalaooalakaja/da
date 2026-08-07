@@ -1121,9 +1121,11 @@ async def quick_complete_po(po_id: str, request: Request):
         steps.append({'step': 4, 'name': 'Production Job', 'status': 'reused',
                       'id': job_id, 'number': job_number})
     else:
-        job_seq = (await db.production_jobs.count_documents({})) + 1
+        # RC-5 fix: atomic race-safe numbering (was count_documents()+1 → dua
+        # "Quick Complete" yang berjalan bersamaan menghasilkan nomor job KEMBAR).
+        from utils.counters import gen_prefixed_number as _gen_job_number
         job_id = new_id()
-        job_number = f"JOB-{str(job_seq).zfill(4)}"
+        job_number = await _gen_job_number(db, 'production_jobs', 'job_number', 'JOB-', 4)
         job = {
             'id': job_id, 'job_number': job_number,
             'parent_job_id': None, 'parent_job_number': None,

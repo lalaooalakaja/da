@@ -3,7 +3,7 @@
 > Dihasilkan `scripts/gate.sh`. JANGAN edit manual.
 > "Selesai" hanya sah bila receipt HIJAU untuk cakupan yang TIDAK di-skip.
 
-- **Waktu:** 2026-08-07 16:20:43  ·  **Durasi:** 43s  ·  **Mode:** cepat
+- **Waktu:** 2026-08-07 17:00:52  ·  **Durasi:** 44s  ·  **Mode:** cepat
 - **Backend:** RUNNING · **Auth:** READY
 
 | Gate | Hasil |

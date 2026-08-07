@@ -22,6 +22,7 @@ Endpoints (prefix /api/data-transfer):
 import io
 import csv
 import json
+import logging
 import uuid
 from datetime import datetime, timezone, date
 
@@ -613,8 +614,15 @@ async def import_table(key: str, request: Request, file: UploadFile = File(...),
             try:
                 from routes.coa_auto import ensure_subledger_for_entity
                 await ensure_subledger_for_entity(db, _et, doc, user)
-            except Exception as _e:
-                pass
+            except Exception as _e:  # noqa: BLE001
+                # 2026-08-07 — DULU `pass` (variabel `_e` bahkan tak dipakai).
+                # Impor massal yang gagal membuat subledger COA menghasilkan
+                # entitas uang tanpa akun Buku Besar — dan karena impornya
+                # ratusan baris, tanpa log tidak mungkin tahu mana yang bolong.
+                logging.getLogger(__name__).error(
+                    "[coa] impor: subledger COA (%s) GAGAL untuk %s — entitas ini "
+                    "tidak punya akun Buku Besar: %s",
+                    _et, doc.get("name") or doc.get("id"), _e)
 
     await log_activity(user.get("id"), user.get("name"), "import",
                        f"data-transfer:{key}", f"import {inserted} baru, {updated} update")

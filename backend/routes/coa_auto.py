@@ -240,8 +240,11 @@ async def ensure_subledger_account(
                     user.get("id", "system"), user.get("name", "system"),
                     "auto_create_coa", "coa", f"{code} ({entity_type})",
                 )
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 — jejak aktivitas tidak boleh
+            # membatalkan pembuatan akun COA yang sudah berhasil, tapi hilangnya
+            # jejak audit harus tetap terlihat (dulu `pass` tanpa suara).
+            log.warning("[coa_auto] gagal mencatat jejak aktivitas pembuatan COA %s (%s): %s",
+                        code, entity_type, e)
         return {"ok": True, "created": True, "code": code, "account": doc}
     except Exception as e:
         log.warning(f"[coa_auto] ensure_subledger_account failed ({entity_type}/{entity_id}): {e}")

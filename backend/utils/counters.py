@@ -234,3 +234,92 @@ def invalidate_format_cache(key: Optional[str] = None) -> None:
         _CFG_CACHE.pop(key, None)
     else:
         _CFG_CACHE.clear()
+
+
+# ─── JARING PENGAMAN DATABASE: NOMOR DOKUMEN WAJIB UNIK ───────────────────────
+# 2026-08-07 — temuan saat menutup anti-pola RC-5 (`count_documents()+1`).
+# Penomoran di KODE sudah atomik lewat `gen_prefixed_number`, TETAPI delapan
+# koleksi bernomor sama sekali tidak punya index unik, antara lain:
+#     warehouse_receiving.gr_number        (penerimaan barang → MENAMBAH STOK)
+#     rahaza_material_issues.issue_number  (pengeluaran barang → MENGURANGI STOK)
+#     dewi_procurement_requests.request_number
+#     acc_purchase_requests.pr_number
+#     production_jobs.job_number · production_returns.return_number
+# Tanpa index unik, satu saja jalur tulis yang melewati generator (impor massal,
+# migrasi, skrip perbaikan, atau kode baru) bisa menanam nomor KEMBAR secara
+# diam-diam. Nomor kembar pada dokumen stok/uang berarti dua transaksi berbeda
+# tampak sebagai satu dokumen — dan tidak ada yang tahu sampai angka tak cocok.
+#
+# `partialFilterExpression: {field: {"$gt": ""}}` HANYA mengindeks string tidak
+# kosong, sehingga dokumen lama yang nomornya null/"" tidak menghalangi.
+UNIQUE_NUMBERED_FIELDS: tuple[tuple[str, str], ...] = (
+    ("rahaza_journal_entries", "je_number"),
+    ("rahaza_work_orders", "wo_number"),
+    ("rahaza_orders", "order_number"),
+    ("rahaza_ar_invoices", "invoice_number"),
+    ("rahaza_ap_invoices", "invoice_number"),
+    ("rahaza_payroll_runs", "run_number"),
+    ("rahaza_material_issues", "issue_number"),
+    ("warehouse_receiving", "gr_number"),
+    ("dewi_maklon_pos", "po_number"),
+    ("rahaza_purchase_orders", "po_number"),
+    ("wh_cmt_dispatches", "dispatch_number"),
+    ("wh_delivery_notes", "dn_number"),
+    ("dewi_maklon_samples", "sample_code"),
+    ("production_jobs", "job_number"),
+    ("production_returns", "return_number"),
+    ("dewi_procurement_requests", "request_number"),
+    ("acc_purchase_requests", "pr_number"),
+)
+
+
+async def find_duplicate_numbers(db, collection: str, field: str, limit: int = 20) -> list:
+    """Nomor yang muncul lebih dari sekali (untuk laporan yang bisa ditindak)."""
+    try:
+        rows = await db[collection].aggregate([
+            {"$match": {field: {"$nin": [None, ""]}}},
+            {"$group": {"_id": f"${field}", "n": {"$sum": 1}}},
+            {"$match": {"n": {"$gt": 1}}},
+            {"$sort": {"n": -1}},
+            {"$limit": limit},
+        ]).to_list(limit)
+        return [{"number": r["_id"], "count": r["n"]} for r in rows]
+    except Exception:
+        return []
+
+
+async def ensure_unique_number_indexes(db, logger=None) -> dict:
+    """Pasang index unik untuk semua field nomor dokumen. IDEMPOTEN.
+
+    Sengaja TIDAK melempar error: bila sebuah koleksi sudah memuat nomor kembar,
+    index-nya gagal dibuat — dan itu harus dilaporkan DENGAN NOMORNYA supaya bisa
+    diperbaiki, bukan ditelan diam-diam. Nilai balik dipakai gate/laporan.
+    """
+    import logging
+    log = logger or logging.getLogger(__name__)
+    created, already, blocked = [], [], []
+    for coll, field in UNIQUE_NUMBERED_FIELDS:
+        try:
+            await db[coll].create_index(
+                field, unique=True, name=f"uniq_{field}",
+                partialFilterExpression={field: {"$gt": ""}},
+            )
+            created.append(f"{coll}.{field}")
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "already exists" in msg or "IndexOptionsConflict" in msg or "same name" in msg:
+                already.append(f"{coll}.{field}")
+                continue
+            dups = await find_duplicate_numbers(db, coll, field)
+            blocked.append({"collection": coll, "field": field,
+                            "duplicates": dups, "error": msg[:200]})
+            log.error(
+                "[nomor-dokumen] index unik %s.%s GAGAL — ada nomor KEMBAR: %s. "
+                "Perbaiki duplikatnya, lalu restart backend supaya index terpasang.",
+                coll, field, dups or msg[:120])
+    if blocked:
+        log.error("[nomor-dokumen] %d koleksi masih rawan nomor kembar.", len(blocked))
+    else:
+        log.info("[nomor-dokumen] semua %d field nomor dokumen dilindungi index unik.",
+                 len(UNIQUE_NUMBERED_FIELDS))
+    return {"created": created, "already": already, "blocked": blocked}

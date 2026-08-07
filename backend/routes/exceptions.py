@@ -402,8 +402,12 @@ async def create_return(request: Request):
     db = get_db()
     body = await request.json()
     return_id = new_id()
-    seq = (await db.production_returns.count_documents({})) + 1
-    return_number = f"RTN-{str(seq).zfill(4)}"
+    # RC-5 fix: atomic race-safe numbering (was count_documents()+1 → dua retur
+    # produksi yang dibuat bersamaan mendapat nomor RTN yang SAMA, dan nomor
+    # dipakai ulang setelah retur dihapus — jejak barang keluar jadi ambigu).
+    from utils.counters import gen_prefixed_number
+    return_number = await gen_prefixed_number(db, 'production_returns',
+                                              'return_number', 'RTN-', 4)
     ref_po = await db.production_pos.find_one({'id': body.get('reference_po_id')}) if body.get('reference_po_id') else None
     items_data = body.get('items', [])
 

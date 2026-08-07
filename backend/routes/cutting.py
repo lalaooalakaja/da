@@ -819,8 +819,12 @@ async def cancel_order(oid: str, request: Request):
     body = {}
     try:
         body = await request.json()
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 — BODY OPSIONAL: pembatalan boleh dikirim
+        # tanpa body sama sekali (mis. tombol "Batalkan" tanpa alasan). Ini bukan
+        # kegagalan, jadi memang tidak ada yang perlu dicatat — `reason` di bawah
+        # akan menjadi string kosong. Sengaja dibiarkan tanpa log agar tidak
+        # membanjiri log dengan kejadian normal.
+        body = {}
     await db[ORDERS].update_one({"id": oid}, {"$set": {
         "status": STATUS_CANCELLED,
         "cancel_reason": (body or {}).get("reason") or "",

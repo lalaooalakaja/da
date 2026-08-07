@@ -32,6 +32,9 @@ from datetime import datetime, timezone
 from core import stock_service
 from core.stock_schema import read_qty
 from utils.reject_reasons import normalize_reject_reasons, summarize_by_reason
+import logging
+
+logger = logging.getLogger(__name__)
 
 QUARANTINE_COLL = "wh_quarantine_items"
 QUARANTINE_CODE = "ZNA-KARANTINA"
@@ -62,13 +65,24 @@ def _r(v) -> float:
 async def get_quarantine_location_id(db) -> str:
     """Resolve (dan auto-provision) lokasi karantina. Selalu balik id yang valid."""
     # 1) zona kanonik wh_* peran 'karantina'
+    #
+    # 2026-08-07 — DULU `except Exception: pass`. Ini berbahaya HALUS: bila
+    # pencarian zona kanonik gagal, fungsi diam-diam jatuh ke lokasi LEGACY,
+    # sehingga stok karantina yang seharusnya satu lokasi bisa TERBELAH ke dua
+    # id lokasi berbeda tanpa jejak. Angka karantina lalu tampak 0 di satu
+    # tempat dan 10 di tempat lain — persis kebingungan yang memakan waktu
+    # saat menelusuri INV-4. Fallback-nya tetap dipertahankan (fitur tidak
+    # boleh mati), tetapi sekarang SELALU meninggalkan jejak.
     try:
         from core import location_resolver
         zid = await location_resolver.canonical_zone_id_for_role(db, QUARANTINE_ROLE)
         if zid:
             return zid
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[karantina] gagal resolusi zona kanonik peran '%s' — memakai lokasi legacy "
+            "%s. Stok karantina bisa terbelah antar lokasi bila ini berulang: %s",
+            QUARANTINE_ROLE, QUARANTINE_CODE, e)
     # 2) legacy rahaza_locations (auto-create bila belum ada)
     loc = await db.rahaza_locations.find_one({"code": QUARANTINE_CODE}, {"_id": 0, "id": 1})
     if loc:
@@ -99,8 +113,9 @@ async def get_quarantine_location_info(db) -> dict:
         # build_display_map balik {id: {code, name, source}} — ambil string-nya
         name = disp.get("name") or ""
         code = disp.get("code") or code
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001 — hanya penamaan untuk UI; ada fallback
+        # di bawah. Tetap dicatat supaya kegagalan resolusi nama tidak senyap.
+        logger.debug("[karantina] gagal resolusi nama lokasi karantina %s: %s", qid, e)
     if not name:
         loc = await db.rahaza_locations.find_one({"id": qid}, {"_id": 0, "name": 1, "code": 1}) or {}
         name = loc.get("name") or "Area Karantina QC"
@@ -147,13 +162,25 @@ async def quarantine_in(db, *, material_id: str, qty: float, unit: str = "pcs",
     else:
         await stock_service.add(material_id, qloc, qty, meta=meta, ref=ref, actor=actor, db=db)
 
-    # Blokir ketersediaan: reserve sebesar qty yang baru masuk
+    # Blokir ketersediaan: reserve sebesar qty yang baru masuk.
+    #
+    # 2026-08-07 — DULU `except Exception: pass` dengan komentar "tidak fatal".
+    # Komentar itu MENYESATKAN: kalau reserve gagal, barang REJECT tetap terhitung
+    # sebagai stok TERSEDIA (`available = qty - reserved`), sehingga barang cacat
+    # bisa ikut dipilih untuk produksi atau DIKIRIM KE PEMBELI. Penanda
+    # `quarantine/blocked` di baris stok hanya menyembunyikannya dari dropdown UI
+    # — ia tidak menghalangi jalur mana pun yang menghitung `available`.
+    # Sekarang kegagalannya SELALU dicatat sebagai ERROR beserta konteksnya.
+    blocked_ok = True
     try:
         await stock_service.reserve(material_id, qloc, qty,
                                    ref={**ref, "reason": "quarantine_block"}, actor=actor, db=db)
-    except Exception:
-        # tidak fatal: baris tetap bertanda quarantine + tidak muncul di dropdown storage
-        pass
+    except Exception as e:  # noqa: BLE001
+        blocked_ok = False
+        logger.error(
+            "[karantina] GAGAL memblokir ketersediaan %s unit material %s di lokasi %s — "
+            "barang REJECT masih terhitung tersedia dan bisa terpakai/terkirim. "
+            "Segera periksa: %s", qty, material_id, qloc, e)
     await db[stock_service.STOCK].update_one(
         {"material_id": material_id, "location_id": qloc},
         {"$set": {"quarantine": True, "blocked": True}})
@@ -177,6 +204,10 @@ async def quarantine_in(db, *, material_id: str, qty: float, unit: str = "pcs",
         # dari `routes/rahaza_grn_qc.py`) yang dulu merobohkan `summary()` dengan 500.
         "reject_reasons": normalize_reject_reasons(reject_reasons, default_qty=qty),
         "notes": notes,
+        # Ketersediaan benar-benar terblokir? Bila False, barang reject ini MASIH
+        # terhitung tersedia dan harus ditangani manual. Disimpan supaya bisa
+        # ditampilkan/di-audit, bukan hanya tenggelam di log server.
+        "availability_blocked": bool(blocked_ok),
         "dispositions": [],
         "created_at": _now(),
         "created_by": (actor or {}).get("name", ""),
@@ -214,12 +245,34 @@ async def quarantine_out(db, *, item: dict, action: str, qty: float,
     ref = {"source": f"quarantine_{action}", "quarantine_item_id": item["id"],
            "quarantine_no": item.get("id"), "notes": notes}
 
-    # lepas blokir (reserved) sebesar qty agar mutasi fisik boleh jalan
+    # Lepas blokir (reserved) sebesar qty agar mutasi fisik boleh jalan.
+    #
+    # 2026-08-07 — DULU `except Exception: pass`. Itu MERUSAK ANGKA STOK diam-diam:
+    # `stock_service.issue()` menjaga qty FISIK (`qty >= qty_keluar`), BUKAN qty
+    # tersedia. Jadi kalau pelepasan blokir gagal tetapi disposisi tetap lanjut,
+    # qty fisik berkurang sementara `reserved_quantity` tetap ⇒
+    # `available_quantity = qty - reserved` menjadi NEGATIF, tanpa error, tanpa
+    # log, tanpa ada yang tahu. Stok "tersedia" yang negatif merusak semua
+    # keputusan sesudahnya (produksi, penjualan, opname).
+    #
+    # Sekarang: SELALU dicatat, dan operasinya DIHENTIKAN. Menghentikan lebih
+    # aman daripada melanjutkan — satu-satunya penyebab gagal yang wajar adalah
+    # baris stoknya tidak ada, dan dalam kasus itu `move()`/`issue()` di bawah
+    # PASTI gagal juga. Jadi tidak ada alur sah yang jadi mati karena ini.
     try:
         await stock_service.release(material_id, qloc, qty,
                                    ref={**ref, "reason": "quarantine_unblock"}, actor=actor, db=db)
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "[karantina] GAGAL melepas blokir sebelum disposisi %s — dihentikan supaya "
+            "stok tersedia tidak jadi negatif. item=%s material=%s lokasi=%s qty=%s: %s",
+            action, item.get("id"), material_id, qloc, qty, e)
+        raise ValueError(
+            f"Blokir karantina tidak bisa dilepas untuk {qty} unit "
+            f"(material {item.get('material_code') or material_id}). "
+            "Disposisi dibatalkan agar stok tersedia tidak menjadi negatif. "
+            "Periksa baris stok di lokasi karantina, lalu ulangi."
+        ) from e
 
     if action == ACTION_RELEASE:
         if not to_location_id:

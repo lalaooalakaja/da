@@ -33,6 +33,9 @@ from datetime import datetime, timezone
 from database import get_db
 from core.stock_schema import read_qty, read_available, read_reserved
 from core import uom as _uom
+import logging
+
+logger = logging.getLogger(__name__)
 
 STOCK = "rahaza_material_stock"
 LEDGER = "rahaza_stock_ledger"
@@ -379,11 +382,20 @@ async def reserve_material(material_id, qty, *, ref=None, actor=None, db=None):
         if remaining > 0:  # race: kurang di tengah → rollback
             raise InsufficientStock(material_id, None, qty, _r(qty - remaining))
     except Exception:
+        # 2026-08-07 — DULU rollback-nya `except Exception: pass` (bersarang).
+        # Kalau pelepasan rollback gagal, stok tetap TER-RESERVE selamanya:
+        # barang ada secara fisik tetapi tidak pernah bisa dipakai lagi, dan
+        # tidak ada satu pun jejak yang menjelaskan kenapa. Sekarang setiap
+        # kegagalan rollback dicatat lengkap dengan baris & jumlahnya supaya
+        # bisa dibersihkan; error aslinya tetap dilempar ke pemanggil.
         for sid, amt in done:
             try:
                 await _release_row(sid, amt, db=db)
-            except Exception:
-                pass
+            except Exception as re_err:  # noqa: BLE001
+                logger.error(
+                    "[stok] ROLLBACK reservasi GAGAL — stok akan tetap ter-reserve dan "
+                    "tidak bisa dipakai. material=%s baris_stok=%s qty=%s: %s",
+                    material_id, sid, amt, re_err)
         raise
     return {"material_id": material_id, "reserved": qty, "rows": done}
 

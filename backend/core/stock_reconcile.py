@@ -47,6 +47,9 @@ from datetime import datetime, timezone
 from core import location_resolver
 from core.material_fields import storage_role_of
 from core.stock_schema import read_qty, read_reserved
+import logging
+
+logger = logging.getLogger(__name__)
 
 COLL = "rahaza_material_stock"
 LOG_COLL = "wh_stock_schema_reconcile_log"
@@ -191,12 +194,17 @@ async def _resolve_location_for(db, material: dict | None, cache: dict,
     if role in cache:
         return cache[role]
     resolved = ("", "unresolved")
+    # 2026-08-07 — DULU `except Exception: pass`. Rekonsiliasi stok yang salah
+    # menebak lokasi tujuan akan MEMINDAHKAN baris stok ke lokasi yang salah.
+    # Fallback legacy dipertahankan, tetapi kegagalannya wajib tercatat.
     try:
         zid = await location_resolver.canonical_zone_id_for_role(db, role)
         if zid:
             resolved = (zid, "wh_zones")
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[rekonsiliasi-stok] gagal resolusi zona kanonik peran '%s' — memakai lokasi "
+            "legacy. Baris stok bisa dipindahkan ke lokasi yang salah: %s", role, e)
     if not resolved[0]:
         legacy_codes = {
             "bahan": "ZNA-KAIN",

@@ -142,8 +142,15 @@ async def login(request: Request):
         _portals, _hidden = _acc['portals'], _acc['hidden_modules']
         if _acc['extra_permissions'] and '*' not in user_perms:
             user_perms = sorted(set(user_perms) | set(_acc['extra_permissions']))
-    except Exception:  # noqa: BLE001 — login tidak boleh gagal karena RBAC
-        pass
+    except Exception as e:  # noqa: BLE001 — login TIDAK BOLEH gagal karena RBAC.
+        # Fallback ke portal bawaan `get_user_portals`. 2026-08-07: dulu `pass`
+        # senyap, sehingga bila resolusi izin gagal, pengguna diam-diam masuk
+        # dengan akses BAWAAN (bukan yang diatur owner) dan tidak ada satu pun
+        # jejak yang menjelaskan kenapa menunya berbeda.
+        logger.warning(
+            "[auth] resolusi akses role GAGAL untuk %s (role=%s) — memakai portal "
+            "bawaan, konfigurasi izin owner TIDAK diterapkan pada sesi ini: %s",
+            u.get('email'), role, e)
     return {'token': token, 'user': {'id': u['id'], 'name': u['name'], 'email': u['email'], 'role': u['role'],
             'vendor_id': u.get('vendor_id'), 'buyer_id': u.get('buyer_id'),
             'customer_name': u.get('customer_name', u.get('buyer_company', '')),

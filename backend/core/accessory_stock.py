@@ -18,6 +18,9 @@ from datetime import datetime, timezone
 
 from core import stock_service
 from core.stock_schema import read_qty
+import logging
+
+logger = logging.getLogger(__name__)
 
 ACC_LOC_CODE = "ZNA-AKSESORIS"
 
@@ -38,13 +41,22 @@ async def get_accessory_location_id(db) -> str:
     — dibuat bila belum ada. Reader mengagregasi lintas semua baris → stok lama (rahaza id)
     tetap terhitung meski penulisan baru mengarah ke zona kanonik."""
     # 1) Canonical wh zone (jika ada)
+    #
+    # 2026-08-07 — DULU `except Exception: pass`. Sama seperti di
+    # `core/quarantine.py`: kegagalan resolusi zona kanonik membuat penulisan
+    # stok aksesoris diam-diam pindah ke lokasi LEGACY, sehingga stok satu
+    # material bisa terbelah ke dua id lokasi tanpa jejak apa pun. Fallback
+    # tetap ada (fitur tidak boleh mati), tapi wajib meninggalkan jejak.
     try:
         from core import location_resolver
         zid = await location_resolver.canonical_zone_id_for_role(db, "aksesoris")
         if zid:
             return zid
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[aksesoris] gagal resolusi zona kanonik peran 'aksesoris' — memakai lokasi "
+            "legacy %s. Stok aksesoris bisa terbelah antar lokasi bila ini berulang: %s",
+            ACC_LOC_CODE, e)
     # 2) Fallback legacy rahaza_locations
     loc = await db.rahaza_locations.find_one({"code": ACC_LOC_CODE}, {"_id": 0, "id": 1})
     if loc:

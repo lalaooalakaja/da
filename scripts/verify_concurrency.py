@@ -101,15 +101,36 @@ def skip(m):
 
 # Koleksi ber-unique-index utk field bernomor: count-based numbering di sini = 500 E11000
 # saat balapan. CC2 menjaga agar anti-pola RC-5 tidak muncul kembali di sini.
-_UNIQUE_NUMBERED = {
-    "rahaza_journal_entries", "rahaza_work_orders", "rahaza_orders",
-    "rahaza_ar_invoices", "rahaza_ap_invoices", "rahaza_payroll_runs",
-    "rahaza_material_issues", "rahaza_bundles", "warehouse_receiving",
-    "rahaza_hpp_snapshots", "dewi_maklon_pos",
-    # Session #29 sweep (BUG-1b extension): additional unique-indexed numbered collections
-    "wh_cmt_dispatches", "wh_delivery_notes", "dewi_maklon_samples",
-    "rahaza_purchase_orders", "dewi_maklon_dispatches", "dewi_maklon_invoices",
-    "dewi_cmt_delivery_orders", "rahaza_lkp",
+#
+# 2026-08-07 — daftarnya DIAMBIL DARI SSOT `utils.counters.UNIQUE_NUMBERED_FIELDS`
+# (daftar yang sama yang memasang index uniknya saat startup). Sebelumnya daftar
+# ini ditulis ulang di sini dan sudah MENYIMPANG: `production_jobs`,
+# `production_returns`, `dewi_procurement_requests`, dan `acc_purchase_requests`
+# tidak terdaftar, sehingga tiga anti-pola `count_documents()+1` LOLOS dari gate
+# ini sampai ditemukan manual. Penjaga yang daftarnya sendiri bisa kedaluwarsa
+# adalah penjaga yang tidak menjaga apa pun.
+def _load_unique_numbered() -> set:
+    try:
+        sys.path.insert(0, str(ROOT / "backend"))
+        from utils.counters import UNIQUE_NUMBERED_FIELDS
+        return {c for c, _f in UNIQUE_NUMBERED_FIELDS}
+    except Exception as e:
+        print(f"{Y}  CC2: gagal memuat SSOT UNIQUE_NUMBERED_FIELDS ({e}) — pakai daftar cadangan.{X}")
+        return {
+            "rahaza_journal_entries", "rahaza_work_orders", "rahaza_orders",
+            "rahaza_ar_invoices", "rahaza_ap_invoices", "rahaza_payroll_runs",
+            "rahaza_material_issues", "rahaza_bundles", "warehouse_receiving",
+            "rahaza_hpp_snapshots", "dewi_maklon_pos",
+            "wh_cmt_dispatches", "wh_delivery_notes", "dewi_maklon_samples",
+            "rahaza_purchase_orders", "dewi_maklon_dispatches", "dewi_maklon_invoices",
+            "dewi_cmt_delivery_orders", "rahaza_lkp",
+        }
+
+
+_UNIQUE_NUMBERED = _load_unique_numbered() | {
+    # Koleksi bernomor lain yang keunikannya penting walau belum ada di SSOT.
+    "rahaza_bundles", "rahaza_hpp_snapshots", "dewi_maklon_dispatches",
+    "dewi_maklon_invoices", "dewi_cmt_delivery_orders", "rahaza_lkp",
 }
 
 
@@ -320,9 +341,52 @@ async def _cc6_stock_adjust(c, H):
         ok(f"CC6 (stock adjust) {N} decrease paralel → tepat 1×200, qty={qty} (10-8), no negative/lost-update. Race-safe.")
 
 
+def _cc7_unique_index_present():
+    """CC7 (jaring pengaman DB): setiap field nomor dokumen HARUS punya index unik.
+
+    Penomoran atomik di kode saja tidak cukup — satu jalur tulis yang melewati
+    generator (impor massal, migrasi, skrip perbaikan, kode baru) bisa menanam
+    nomor KEMBAR tanpa suara. Sampai 2026-08-07 DELAPAN koleksi bernomor tidak
+    punya index unik, termasuk `warehouse_receiving.gr_number` (penerimaan barang
+    → MENAMBAH STOK) dan `rahaza_material_issues.issue_number` (→ MENGURANGI STOK).
+    """
+    try:
+        sys.path.insert(0, str(ROOT / "backend"))
+        from utils.counters import UNIQUE_NUMBERED_FIELDS
+    except Exception as e:
+        skip(f"CC7 (index unik nomor dokumen) tak bisa memuat SSOT ({e}) — SKIP.")
+        return
+    existing = set(DBC.list_collection_names())
+    missing, dup_found = [], []
+    for coll, field in UNIQUE_NUMBERED_FIELDS:
+        if coll not in existing:
+            continue          # koleksi belum lahir → index dipasang saat startup berikutnya
+        info = DBC[coll].index_information()
+        has = any(v.get("unique") and any(k[0] == field for k in v.get("key", []))
+                  for v in info.values())
+        if not has:
+            missing.append(f"{coll}.{field}")
+        rows = list(DBC[coll].aggregate([
+            {"$match": {field: {"$nin": [None, ""]}}},
+            {"$group": {"_id": f"${field}", "n": {"$sum": 1}}},
+            {"$match": {"n": {"$gt": 1}}}, {"$limit": 5},
+        ]))
+        if rows:
+            dup_found.append(f"{coll}.{field}={[r['_id'] for r in rows]}")
+    if dup_found:
+        fail(f"CC7 (nomor kembar NYATA di database): {'; '.join(dup_found)}")
+    elif missing:
+        fail(f"CC7 (index unik nomor dokumen) {len(missing)} field TANPA index unik "
+             f"— nomor kembar bisa masuk diam-diam: {', '.join(missing[:8])}")
+    else:
+        ok(f"CC7 (index unik nomor dokumen) {len(UNIQUE_NUMBERED_FIELDS)} field nomor "
+           f"dilindungi index unik & tidak ada nomor kembar.")
+
+
 async def main():
     print(f"\n{B}{'='*64}{X}\n  CONCURRENCY GATE (RC-5 counter / TOCTOU)  API={API}\n{B}{'='*64}{X}")
     _cc2_static_regression()
+    _cc7_unique_index_present()
     async with httpx.AsyncClient(follow_redirects=True, timeout=40) as c:
         try:
             r = await c.get(f"{API}/api/health", timeout=5)

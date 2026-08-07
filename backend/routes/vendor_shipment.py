@@ -378,9 +378,18 @@ async def _create_child_job_from_inspection(db, shipment: dict, inspection: dict
         return None
 
     child_job_id = new_id()
+    # RC-5 (2026-08-07) — nomor job ANAK dulu memakai
+    # `count_documents({parent_job_id}) + 1`. Dua kiriman tambahan/rework yang
+    # diproses bersamaan membaca hitungan yang SAMA lalu menghasilkan nomor job
+    # KEMBAR (mis. dua "JOB-0007-A1"), sehingga catatan produksi dua kiriman
+    # berbeda saling tertukar. Sekarang urutannya dari counter atomik per JOB
+    # INDUK — sama dengan jalur di routes/production_execution.py.
+    from utils.counters import next_counter
     suffix = 'A' if shipment.get('shipment_type') == 'ADDITIONAL' else 'R'
-    child_count = await db.production_jobs.count_documents({'parent_job_id': parent_job['id']})
-    child_job_number = f"{parent_job['job_number']}-{suffix}{child_count + 1}"
+    child_seq = await next_counter(
+        db, f"autonum:production_jobs:child:{parent_job['id']}:{suffix}",
+        namespace='autonum')
+    child_job_number = f"{parent_job['job_number']}-{suffix}{child_seq}"
     child_job = {
         'id': child_job_id, 'job_number': child_job_number,
         'parent_job_id': parent_job['id'], 'parent_job_number': parent_job['job_number'],

@@ -845,12 +845,18 @@ async def create_cash_account(request: Request):
         "created_at": _now(), "updated_at": _now(),
     }
     await db.rahaza_cash_accounts.insert_one(doc)
-    # Phase 6: auto-create COA subledger (Bank) — idempotent, non-fatal
+    # Phase 6: auto-create COA subledger (Bank) — idempotent, non-fatal.
+    # 2026-08-07 — DULU `except Exception: pass`. Rekening bank tanpa subledger
+    # COA berarti mutasi kasnya tidak punya tempat di Buku Besar; ini ketahuan
+    # jauh kemudian saat neraca tidak seimbang. Tetap non-fatal (pembuatan
+    # rekening tidak boleh gagal karena COA), tapi WAJIB tercatat.
     try:
         from routes.coa_auto import ensure_subledger_for_entity
         await ensure_subledger_for_entity(db, "bank", doc, user)
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001
+        log.error("[coa] subledger COA bank GAGAL dibuat untuk rekening %s (%s) — "
+                  "mutasi kas rekening ini tidak punya akun Buku Besar: %s",
+                  doc.get("name") or doc.get("id"), doc.get("account_number"), e)
     out = await db.rahaza_cash_accounts.find_one({"id": doc["id"]}, {"_id": 0})
     return serialize_doc(out)
 

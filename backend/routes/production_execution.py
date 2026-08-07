@@ -544,13 +544,26 @@ async def create_job(request: Request):
     po_id = body.get('po_id') or (ship_items[0].get('po_id') if ship_items else None)
     po = await db.production_pos.find_one({'id': po_id}) if po_id else None
     job_id = new_id()
-    job_seq = (await db.production_jobs.count_documents({})) + 1
     if parent_job_number:
+        # ── RC-5 (2026-08-07) ────────────────────────────────────────────────
+        # Nomor job ANAK dulu memakai `count_documents({parent_job_id}) + 1`.
+        # Dua pengiriman tambahan/rework yang masuk bersamaan membaca hitungan
+        # yang SAMA lalu menghasilkan nomor job KEMBAR (mis. dua "JOB-0007-R1"),
+        # sehingga catatan produksi dua kiriman berbeda saling tertukar.
+        # Sekarang urutannya dari counter atomik per JOB INDUK.
+        from utils.counters import next_counter
         suffix = 'A' if shipment.get('shipment_type') == 'ADDITIONAL' else 'R'
-        child_count = await db.production_jobs.count_documents({'parent_job_id': parent_job_id})
-        job_number = f"{parent_job_number}-{suffix}{child_count + 1}"
+        child_seq = await next_counter(
+            db, f"autonum:production_jobs:child:{parent_job_id}:{suffix}",
+            namespace='autonum')
+        job_number = f"{parent_job_number}-{suffix}{child_seq}"
     else:
-        job_number = f"JOB-{str(job_seq).zfill(4)}"
+        # RC-5 fix: atomic race-safe numbering (was count_documents()+1 → nomor
+        # job kembar saat dua job dibuat bersamaan, dan nomor DIPAKAI ULANG
+        # setelah job dihapus).
+        from utils.counters import gen_prefixed_number
+        job_number = await gen_prefixed_number(db, 'production_jobs', 'job_number',
+                                               'JOB-', 4)
     job = {
         'id': job_id, 'job_number': job_number,
         'parent_job_id': parent_job_id, 'parent_job_number': parent_job_number,
