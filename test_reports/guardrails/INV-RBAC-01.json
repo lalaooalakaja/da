@@ -1,0 +1,13 @@
+{
+  "gate": "INV-RBAC-01",
+  "title": "RBAC/kebocoran akses (unauth sweep + cross-role escalation)",
+  "checked": 724,
+  "counts": {},
+  "blocking": 0,
+  "block_sev": [
+    "HIGH"
+  ],
+  "duration_s": 2.83,
+  "ts": "2026-08-07 09:31:02",
+  "findings": []
+}
