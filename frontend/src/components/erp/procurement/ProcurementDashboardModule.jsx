@@ -161,7 +161,7 @@ export default function ProcurementDashboardModule({ token, onNavigate }) {
              sub={`${k.po_completed ?? 0} PO selesai`}
              onClick={() => onNavigate?.('proc-analytics')} testId="proc-kpi-spend-month" />
         <Kpi icon={PackageCheck} label="Request aksesoris" value={k.accessory_pr_total ?? 0}
-             sub={`${k.accessory_pr_pending ?? 0} menunggu proses`}
+             sub={`${k.accessory_pr_awaiting_approval ?? 0} menunggu persetujuan · ${k.accessory_pr_pending ?? 0} berjalan`}
              onClick={() => onNavigate?.('proc-accessory-pr')} testId="proc-kpi-acc-pr" />
       </div>
 

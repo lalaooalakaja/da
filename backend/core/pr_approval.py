@@ -43,6 +43,23 @@ logger = logging.getLogger(__name__)
 
 STAGE_DEPT, STAGE_FINANCE, STAGE_FINAL = "dept", "finance", "final"
 
+# ── SSOT NAMA KOLEKSI & STATUS REQUEST AKSESORIS ─────────────────────────────
+# 2026-08-07 — ditambahkan setelah menemukan kartu "Request aksesoris" di
+# Dashboard Pengadaan SELALU menampilkan 0. Sebabnya: dua modul lain menebak
+# nama koleksinya (`dewi_accessories_purchase_requests`, `dewi_acc_purchase_requests`)
+# dan KEDUANYA tidak pernah ada — koleksi sebenarnya `acc_purchase_requests`.
+# Nama koleksi yang ditulis berulang di banyak berkas = kelas bug yang sama
+# dengan duplikasi daftar peran. Jadi namanya tinggal di SINI saja.
+ACC_PR_COLLECTION = "acc_purchase_requests"
+# Nama field supplier di Request Aksesoris adalah `supplier` (string bebas),
+# BUKAN `supplier_name` seperti dugaan modul migrasi supplier.
+ACC_PR_SUPPLIER_FIELD = "supplier"
+# Status Request Aksesoris BERKAPITAL. Menyaring dengan huruf kecil = selalu 0.
+ACC_PR_STATUS_DRAFT = "Draft"
+ACC_PR_STATUS_SUBMITTED = "Submitted"
+# "Masih berjalan" = belum jadi pesanan / penerimaan, dan belum ditolak.
+ACC_PR_OPEN_STATUSES = ("Draft", "Submitted", "Approved")
+
 # Peran per tahap. WAJIB SALING LEPAS (disjoint) supaya aturan "satu orang tidak
 # boleh menyetujui dua tahap" punya arti. `manager_keuangan` sengaja DIKELUARKAN
 # dari tahap final — sebelumnya ia terdaftar di tahap keuangan DAN final, jadi

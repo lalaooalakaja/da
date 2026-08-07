@@ -64,6 +64,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from auth import require_auth, serialize_doc, log_activity
 from core import bom_uom, uom as uom_core
+from core.pr_approval import ACC_PR_COLLECTION, ACC_PR_SUPPLIER_FIELD
 from routes.shared import require_portal
 from database import get_db
 from utils.counters import gen_prefixed_number
@@ -663,8 +664,13 @@ async def _collect_legacy_names(db) -> dict:
         ("rahaza_purchase_orders", "vendor_name"),
         ("rahaza_grn_inspections", "supplier_name"),
         ("warehouse_receiving", "supplier_name"),
-        ("dewi_accessories_purchase_requests", "supplier_name"),
-        ("dewi_acc_purchase_requests", "supplier_name"),
+        # 2026-08-07 — DUA nama koleksi lama di sini TIDAK PERNAH ADA
+        # (`dewi_accessories_purchase_requests`, `dewi_acc_purchase_requests`),
+        # dan field-nya juga salah (`supplier_name`; yang benar `supplier`).
+        # Akibatnya nama supplier yang diketik di Request Pembelian Aksesoris
+        # tidak pernah ikut migrasi ke Master Supplier. Nama koleksi & field
+        # sekarang diambil dari SSOT core/pr_approval.py.
+        (ACC_PR_COLLECTION, ACC_PR_SUPPLIER_FIELD),
         ("rahaza_ap_invoices", "vendor_name"),
     ]
     found: dict = {}
@@ -768,8 +774,9 @@ async def migrate_from_legacy(request: Request):
         ("rahaza_purchase_orders", "vendor_name"),
         ("rahaza_grn_inspections", "supplier_name"),
         ("warehouse_receiving", "supplier_name"),
-        ("dewi_accessories_purchase_requests", "supplier_name"),
-        ("dewi_acc_purchase_requests", "supplier_name"),
+        # Lihat catatan di `_collect_legacy_names`: nama koleksi & field Request
+        # Aksesoris diambil dari SSOT, dulu keduanya salah ⇒ backfill tak jalan.
+        (ACC_PR_COLLECTION, ACC_PR_SUPPLIER_FIELD),
         ("rahaza_ap_invoices", "vendor_name"),
     ]
     coll_names = set(await db.list_collection_names())

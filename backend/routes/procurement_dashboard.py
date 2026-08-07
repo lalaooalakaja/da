@@ -11,7 +11,7 @@ ini membaca SEMUA koleksi yang membentuk siklus pengadaan (P2P), bukan satu:
   rahaza_ap_invoices               → Invoice hutang supplier (AP)
   rahaza_suppliers                 → Master supplier
   rahaza_supplier_price_lists      → Daftar harga supplier
-  dewi_accessories_purchase_requests → PR aksesoris (divisi)
+  acc_purchase_requests            → Request Pembelian Aksesoris (divisi)
 
 Endpoint:
   GET /api/procurement/overview        — kartu KPI + antrean kerja + peringatan
@@ -27,6 +27,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from auth import serialize_doc
+from core.pr_approval import ACC_PR_COLLECTION, ACC_PR_OPEN_STATUSES
 from database import get_db
 # 2026-08-06 (BUG-RBAC-PROC-1): dashboard pengadaan dulu memakai `require_auth`
 # (cukup login) sehingga angka belanja, hutang supplier, dan daftar PO/PR bisa
@@ -111,14 +112,25 @@ async def procurement_overview(request: Request):
     sup_active = await _count(db, "rahaza_suppliers", {"is_active": {"$ne": False}})
     price_rows = await _count(db, "rahaza_supplier_price_lists", {"is_active": True})
 
-    # PR aksesoris (divisi) — koleksi terpisah, sering terlewat
-    acc_pr = 0
-    for coll in ("dewi_accessories_purchase_requests", "dewi_acc_purchase_requests"):
-        acc_pr += await _count(db, coll, {})
-    acc_pr_pending = 0
-    for coll in ("dewi_accessories_purchase_requests", "dewi_acc_purchase_requests"):
-        acc_pr_pending += await _count(db, coll, {"status": {"$in": ["draft", "submitted",
-                                                                    "pending"]}})
+    # ── PR aksesoris (divisi) ───────────────────────────────────────────────
+    # BUG 2026-08-07 (lanjutan laporan owner "PR aksesoris harusnya tersambung ke
+    # procurement"): kartu ini SELALU 0 karena dua sebab yang saling menutupi:
+    #   1. koleksi yang dibaca (`dewi_accessories_purchase_requests` dan
+    #      `dewi_acc_purchase_requests`) TIDAK PERNAH ADA. Koleksi sebenarnya
+    #      adalah `acc_purchase_requests` (lihat routes/dewi_accessories_purchase.py
+    #      yang menulis lewat `db.acc_purchase_requests`);
+    #   2. filter statusnya huruf kecil (`draft`/`submitted`), sedangkan Request
+    #      Aksesoris memakai status BERKAPITAL (`Draft`/`Submitted`/`Approved`).
+    # Jadi walau namanya dibetulkan tanpa membetulkan kapitalisasi, angka
+    # "menunggu proses" tetap 0. Keduanya dibetulkan sekaligus di sini.
+    # `ACC_PR_COLLECTION` = SSOT nama koleksi supaya tidak ada tebakan nama lagi.
+    acc_pr = await _count(db, ACC_PR_COLLECTION, {})
+    # "Menunggu proses" = belum menjadi pesanan/penerimaan dan belum ditolak.
+    acc_pr_pending = await _count(db, ACC_PR_COLLECTION,
+                                  {"status": {"$in": ACC_PR_OPEN_STATUSES}})
+    # Yang benar-benar menunggu KEPUTUSAN approver (dipakai antrean kerja).
+    acc_pr_awaiting_approval = await _count(db, ACC_PR_COLLECTION,
+                                            {"status": "Submitted"})
 
     # ── Peringatan: PO jatuh tempo & PO tanpa supplier master ───────────────
     soon = (today + timedelta(days=7)).isoformat()
@@ -160,6 +172,7 @@ async def procurement_overview(request: Request):
             "suppliers_total": sup_total, "suppliers_active": sup_active,
             "price_list_rows": price_rows,
             "accessory_pr_total": acc_pr, "accessory_pr_pending": acc_pr_pending,
+            "accessory_pr_awaiting_approval": acc_pr_awaiting_approval,
         },
         "alerts": {
             "po_overdue": late_pos,

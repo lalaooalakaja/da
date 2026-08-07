@@ -268,6 +268,24 @@ if [ "$NEED_SEED" = "1" ] && [ "$HEALTHY" = "1" ]; then
     else
       warn "seed_procurement_suppliers_demo gagal (lihat /tmp/seed_suppliers.log)"
     fi
+    # 2026-08-07 (sesi lanjutan) — DATA DEMO RANTAI PERSETUJUAN.
+    # Bootstrap segar meninggalkan `dewi_procurement_requests` = 0 DAN
+    # `acc_purchase_requests` = 0, sehingga tiga layar inti Portal Pengadaan
+    # (Permintaan Pengadaan, Request Pembelian Aksesoris, Dashboard Pengadaan)
+    # tampak RUSAK padahal hanya kosong — dan rantai persetujuan dept → keuangan
+    # → final tidak bisa dilihat/diuji lewat layar sama sekali. Sesi sebelumnya
+    # mengkurasi data ini dengan panggilan manual, jadi hilang tiap DB dibangun
+    # ulang. Seeder ini IDEMPOTEN, memakai API sungguhan (jadi jejak audit &
+    # notifikasinya asli), dan tidak menyentuh stok/jurnal. `--cleanup` membuang.
+    # HARUS setelah master supplier: skenario ke-4 (PR → Purchase Order) memilih
+    # supplier dari master.
+    c "  → data demo rantai persetujuan (PR pengadaan + PR aksesoris)"
+    if (cd /app && python3 scripts/seed_approval_demo.py >/tmp/seed_approval.log 2>&1); then
+      ok "data demo persetujuan OK ($(grep -c '✓' /tmp/seed_approval.log) langkah)"
+    else
+      warn "seed_approval_demo gagal (lihat /tmp/seed_approval.log)"
+      tail -5 /tmp/seed_approval.log | sed 's/^/      /'
+    fi
   else
     err "tak bisa login admin utk seed — cek backend log"
   fi

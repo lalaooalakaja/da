@@ -57,6 +57,52 @@ def track(coll, _id):
         CREATED.setdefault(coll, []).append(_id)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PEMBACA STOK — HARUS SAMA DENGAN APLIKASI (anti false-negative)
+# ─────────────────────────────────────────────────────────────────────────────
+def _read_qty(row) -> float:
+    """Jumlah fisik on-hand memakai pembaca RESMI `core.stock_schema.read_qty`.
+
+    `rahaza_material_stock` ditulis 3 skema berbeda (qty / total_qty / quantity),
+    itu sebabnya pembaca berantai ini ada. Membaca `row["qty"]` mentah membuat
+    pemeriksaan bisa melaporkan 0 untuk baris yang sebenarnya berisi.
+    """
+    try:
+        sys.path.insert(0, str(ROOT / "backend"))
+        from core.stock_schema import read_qty
+        return float(read_qty(row))
+    except Exception:  # noqa: BLE001 — fallback setara bila import gagal
+        for k in ("qty", "total_qty", "quantity", "available_quantity"):
+            if (row or {}).get(k) is not None:
+                try:
+                    return float(row[k] or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+        return 0.0
+
+
+def _quarantine_location_id(db):
+    """Lokasi karantina SEPERTI YANG DIPAKAI APLIKASI.
+
+    `core.quarantine.get_quarantine_location_id()` LEBIH DULU memakai zona
+    kanonik `wh_zones` (peran 'karantina') dan baru jatuh ke `rahaza_locations`
+    kode ZNA-KARANTINA. Menebak langsung ke `rahaza_locations` membuat
+    pemeriksaan membaca lokasi yang SALAH begitu struktur kanonik dibuat.
+    """
+    for e in (db.wh_location_migration_map.find({}, {"_id": 0})
+              if "wh_location_migration_map" in db.list_collection_names() else []):
+        if (e.get("role") or "").lower() == "karantina" and e.get("wh_zone_id"):
+            z = db.wh_zones.find_one({"id": e["wh_zone_id"], "active": True}, {"_id": 0, "id": 1})
+            if z:
+                return z["id"]
+    if "wh_zones" in db.list_collection_names():
+        z = db.wh_zones.find_one({"code": "ZNA-KARANTINA", "active": True}, {"_id": 0, "id": 1})
+        if z:
+            return z["id"]
+    return (db.rahaza_locations.find_one({"code": "ZNA-KARANTINA"},
+                                         {"_id": 0, "id": 1}) or {}).get("id")
+
+
 def login(email, pwd):
     if email in _tokens:
         return _tokens[email]
@@ -386,14 +432,26 @@ def main():
         line = lines[0]
 
         # stok FG sebelum (HANYA lokasi gudang FG — karantina dihitung terpisah)
+        # 2026-08-07 — DUA sumber salah-baca yang pernah membuat gate ini MERAH
+        # tanpa ada kerusakan produk (false negative, mahal karena menyesatkan
+        # agent berikutnya):
+        #   1. lokasi karantina DITEBAK dari `rahaza_locations.code = ZNA-KARANTINA`,
+        #      padahal aplikasi memakai `core.quarantine.get_quarantine_location_id()`
+        #      yang LEBIH DULU mencari zona kanonik `wh_zones` (peran 'karantina').
+        #      Begitu struktur kanonik ada, stok karantina ditulis ke id LAIN dan
+        #      pemeriksaan ini membaca 0 — lalu melaporkan "stok FG salah";
+        #   2. jumlah dibaca dari field `qty` MENTAH, padahal koleksi ini ditulis
+        #      3 skema berbeda (lihat core/stock_schema.py) dan pembaca resminya
+        #      adalah `read_qty()`.
+        # Keduanya sekarang memakai jalur yang SAMA dengan aplikasi.
         fg_loc = (db.rahaza_locations.find_one({"code": "ZNA-FG"}, {"_id": 0, "id": 1}) or {}).get("id")
-        q_loc = (db.rahaza_locations.find_one({"code": "ZNA-KARANTINA"}, {"_id": 0, "id": 1}) or {}).get("id")
+        q_loc = _quarantine_location_id(db)
         fg_mat = db.rahaza_materials.find_one({"type": "fg", "code": ji.get("sku")}, {"_id": 0})
         fg_before = 0.0
         if fg_mat:
             rowx = db.rahaza_material_stock.find_one(
                 {"material_id": fg_mat["id"], "location_id": fg_loc}, {"_id": 0})
-            fg_before = float((rowx or {}).get("qty") or 0)
+            fg_before = _read_qty(rowx)
         q_before = db.wh_quarantine_items.count_documents({}) if "wh_quarantine_items" in db.list_collection_names() else 0
 
         # ── QC: 100 dikirim, 90 lolos, 10 reject ──
@@ -434,13 +492,21 @@ def main():
         # ── INV-4: stok FG lokasi gudang FG += 90 (reject 10 ada di karantina) ──
         fg_mat = fg_mat or db.rahaza_materials.find_one({"type": "fg", "code": ji.get("sku")}, {"_id": 0})
         fg_after, q_stock, no_loc = 0.0, 0.0, 0
+        # Setiap lokasi LAIN yang memegang stok material ini dicatat. Dulu baris
+        # seperti ini dilewati tanpa jejak, sehingga stok yang "nyasar" ke lokasi
+        # tak terduga tampil sebagai `stok_karantina: 0` — pesan gagal yang
+        # menyembunyikan penyebabnya dan memakan waktu sesi berikutnya.
+        elsewhere: dict = {}
         for rowx in db.rahaza_material_stock.find({"material_id": (fg_mat or {}).get("id")}, {"_id": 0}):
+            qv = _read_qty(rowx)
             if not rowx.get("location_id"):
                 no_loc += 1
             elif rowx.get("location_id") == fg_loc:
-                fg_after += float(rowx.get("qty") or 0)
+                fg_after += qv
             elif rowx.get("location_id") == q_loc:
-                q_stock += float(rowx.get("qty") or 0)
+                q_stock += qv
+            elif qv:
+                elsewhere[str(rowx.get("location_id"))] = qv
             track("rahaza_material_stock", rowx.get("id"))
         delta = fg_after - fg_before
         if abs(delta - 90) < 0.001 and no_loc == 0 and q_stock >= 10:
@@ -448,7 +514,13 @@ def main():
                {"delta_fg": delta, "stok_karantina": q_stock, "baris_tanpa_location_id": no_loc})
         else:
             bad("INV-4", "stok FG salah / di luar SSOT stok",
-                {"delta_fg": delta, "stok_karantina": q_stock, "baris_tanpa_location_id": no_loc})
+                {"delta_fg": delta, "stok_karantina": q_stock,
+                 "baris_tanpa_location_id": no_loc,
+                 "lokasi_karantina_yang_diperiksa": q_loc,
+                 "lokasi_fg_yang_diperiksa": fg_loc,
+                 # Kalau stok karantina 0 tetapi ada isi di sini, artinya lokasi
+                 # karantina yang dipakai aplikasi BUKAN yang diperiksa.
+                 "stok_di_lokasi_lain": elsewhere})
 
         # ── INV-5: reject masuk karantina ──
         q_items = list(db.wh_quarantine_items.find(

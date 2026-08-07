@@ -1,66 +1,66 @@
 [
   {
-    "content": "Phase 1: Ambang uang PR (pr_1_stage_max / pr_2_stage_max) di services/management_alerts.py + endpoint alert-config",
+    "content": "Phase A: Restore repo + bootstrap environment (backend healthy, FE served, logins OK)",
     "status": "completed"
   },
   {
-    "content": "Phase 1: Chain freeze at submit + compute_required_chain + stage SSOT di dewi_procurement.py",
+    "content": "Phase A: Re-run POC scripts/poc_approval_chain.py (92 checks) in fresh env",
     "status": "completed"
   },
   {
-    "content": "Phase 1: SoD ketat (stage role, no self-approval, no double-stage) + admin override tercatat",
+    "content": "Phase A: Fix ghost-collection bug (acc PR never counted in Procurement Dashboard/supplier migration)",
     "status": "completed"
   },
   {
-    "content": "Phase 1: Server-side flags can_approve/can_reject/blocked_reason/chain di list, detail, inbox, timeline, badge",
+    "content": "Phase A: Re-create approval demo data as IDEMPOTENT seeder + wire into bootstrap.sh",
     "status": "completed"
   },
   {
-    "content": "Phase 1: Notifikasi next approver via notif_insert (bell) + link_module proc-requests + kabar ke pemohon",
+    "content": "Phase A: Fix flaky INV-4 guardrail (raw qty read + guessed quarantine location)",
     "status": "completed"
   },
   {
-    "content": "Phase 1: Seed akun direktur@dewiaditya.id (role director) + akses portal untuk approver",
+    "content": "Phase A: Run bash scripts/gate.sh (13 gates) — GREEN 13/13",
     "status": "completed"
   },
   {
-    "content": "Phase 1: scripts/poc_approval_chain.py — 73/73 PASS (menemukan 3 bug nyata: JWT tanpa department, override admin tak tercatat, chain draft kosong)",
-    "status": "completed"
+    "content": "Phase A: Complete the PENDING testing_agent verification of acc-PR -> procurement",
+    "status": "in_progress"
   },
   {
-    "content": "Phase 2: Frontend tab 'Menunggu Persetujuan Saya' (inbox) di ProcurementRequestModule",
-    "status": "completed"
+    "content": "Phase A: Fix all bugs reported by testing agent",
+    "status": "pending"
   },
   {
-    "content": "Phase 2: Hapus role-gate hardcoded FE, pakai flag server + tampilkan blocked_reason",
-    "status": "completed"
+    "content": "Phase B: Migrate PO approval (rahaza_po.py) to SSOT core/pr_approval engine + RBAC/SoD",
+    "status": "pending"
   },
   {
-    "content": "Phase 2: Stepper rantai approval + label tahap + riwayat override di detail PR",
-    "status": "completed"
+    "content": "Phase B: Frontend PO approval UI follows server flags (can_approve/blocked_reason/stepper)",
+    "status": "pending"
   },
   {
-    "content": "Phase 2: 2 input ambang Rp di ManagementOverviewModule (Ringkasan Bisnis)",
-    "status": "completed"
+    "content": "Phase B: POC + testing agent verification for PO approval",
+    "status": "pending"
   },
   {
-    "content": "Phase 2: Rebuild frontend bundle + restart, log bersih (Compiled successfully)",
-    "status": "completed"
+    "content": "Phase C: Adopt utils/counters.py SSOT for document numbering (kill count_documents()+1 races)",
+    "status": "pending"
   },
   {
-    "content": "Phase 2: End-to-End Testing testing_agent_v3 — iteration_26 backend 26/26, iteration_27 UI inti, iteration_28 UI lanjutan A–E (0 bug)",
-    "status": "completed"
+    "content": "Phase C: Concurrency verification (no duplicate document numbers) + testing agent",
+    "status": "pending"
   },
   {
-    "content": "Phase 3: Verifikasi sendiri butir yang belum diuji agent (lencana TopBar, bel notifikasi, 8 pintu portal, hr@ terkunci) — semua LULUS",
-    "status": "completed"
+    "content": "Phase D: Eliminate silent `except Exception: pass` on stock/money paths (log + surface errors)",
+    "status": "pending"
   },
   {
-    "content": "Phase 3: Fix bug ditemukan saat verifikasi UI (detail PR stale setelah PO dibuat, GateNotice noise) + seeder Master Supplier agar alur PR→PO tidak mentok",
-    "status": "completed"
+    "content": "Phase D: Verification + testing agent for silent-failure fixes",
+    "status": "pending"
   },
   {
-    "content": "Phase 3: gate.sh 13/13 HIJAU + verify_pr_inbox_roles LULUS + update CHANGELOG/plan.md/test_result.md/test_credentials.md",
-    "status": "completed"
+    "content": "Update plan.md / test_result.md / memory docs at end of each phase",
+    "status": "pending"
   }
 ]
